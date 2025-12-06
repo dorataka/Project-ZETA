@@ -5,7 +5,7 @@
 
 ## Overview
 **Project Z.E.T.A.** は、Python (PyQt6) で開発された高性能デスクトップDICOMビューアーです。
-臨床医による個人開発プロジェクトとして、既存のビューアーにはない柔軟性と、SFメカニック（G.U.N.D.A.M. OS）にインスパイアされた没入感のあるUIを目指して設計されています。
+臨床医による個人開発プロジェクトとして、既存のビューアーにはない柔軟性と、SFメカニックにインスパイアされた没入感のあるUIを目指して設計されています。
 
 「高速な画像展開」と「実臨床に即した操作系（PACSライクなマウス操作）」を両立しています。
 
@@ -61,4 +61,4 @@
 
 ## Author
 * **Developer:** dorataka
-* **Role:** Clinical Physician / Developer
+* **Role:** Radiologist / Developer
