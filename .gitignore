@@ -1,0 +1,24 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual Environment (仮想環境)
+.venv/
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+
+# ★重要: 誤ってDICOMデータを上げないためのブロック
+*.dcm
+*.ima
+*.DCM
+DICOM/
+images/
+test_data/
