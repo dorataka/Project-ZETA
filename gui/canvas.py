@@ -1,16 +1,14 @@
 from PyQt6.QtWidgets import QWidget
-from PyQt6.QtGui import QPainter, QPen, QFont, QColor
+from PyQt6.QtGui import QPainter, QPen, QFont, QColor, QFontMetrics
 from PyQt6.QtCore import Qt, QPointF, QPoint, QRectF
 import math
 import numpy as np
 
-# --- ヘルパー関数 ---
 def distance_point_to_segment(p, a, b):
     ab = b - a
     ap = p - a
     len_sq = ab.x()**2 + ab.y()**2
-    if len_sq == 0:
-        return math.sqrt(ap.x()**2 + ap.y()**2)
+    if len_sq == 0: return math.sqrt(ap.x()**2 + ap.y()**2)
     t = (ap.x() * ab.x() + ap.y() * ab.y()) / len_sq
     t = max(0.0, min(1.0, t))
     closest = a + t * ab
@@ -36,19 +34,27 @@ class ImageCanvas(QWidget):
         self.pixel_spacing = None
         self.current_slice_index = 0
         
-        # ★追加: 表示アスペクト比 (デフォルト1.0)
-        self.target_aspect_ratio = 1.0 
+        # ★追加: オーバーレイ情報 (四隅のテキストリスト)
+        self.overlay_data = {
+            'TL': [], # Top-Left
+            'TR': [], # Top-Right
+            'BL': [], # Bottom-Left
+            'BR': []  # Bottom-Right
+        }
 
         self.setStyleSheet("background-color: #000000;")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) 
 
-    # ★変更: aspect_ratio 引数を追加
-    def set_pixmap(self, pixmap, pixel_spacing=None, slice_index=0, hu_grid=None, aspect_ratio=1.0):
+    # ★変更: overlay_dataを受け取る引数を追加
+    def set_pixmap(self, pixmap, pixel_spacing=None, slice_index=0, hu_grid=None, overlay_data=None):
         self.pixmap = pixmap
         self.pixel_spacing = pixel_spacing
         self.current_slice_index = slice_index
-        self.hu_grid = hu_grid 
-        self.target_aspect_ratio = aspect_ratio # 記憶
+        self.hu_grid = hu_grid
+        
+        if overlay_data:
+            self.overlay_data = overlay_data
+            
         self.update()
 
     def reset_view(self):
@@ -60,14 +66,12 @@ class ImageCanvas(QWidget):
         self.selected_type = None
         self.current_drawing_start = None
         self.current_drawing_end = None
-        self.target_aspect_ratio = 1.0
+        # オーバーレイはクリアしない（メタデータは残すため）
         self.update()
 
     def hit_test(self, screen_pos):
-        if isinstance(screen_pos, QPoint):
-            target_point = QPointF(screen_pos)
-        else:
-            target_point = screen_pos
+        if isinstance(screen_pos, QPoint): target_point = QPointF(screen_pos)
+        else: target_point = screen_pos
         threshold = 8.0
         
         for i, roi in enumerate(self.rois):
@@ -76,10 +80,8 @@ class ImageCanvas(QWidget):
             top_left = self.image_to_screen(rect_img.topLeft())
             bottom_right = self.image_to_screen(rect_img.bottomRight())
             rect_scr = QRectF(top_left, bottom_right).normalized()
-            cx = rect_scr.center().x()
-            cy = rect_scr.center().y()
-            rx = rect_scr.width() / 2.0
-            ry = rect_scr.height() / 2.0
+            cx = rect_scr.center().x(); cy = rect_scr.center().y()
+            rx = rect_scr.width() / 2.0; ry = rect_scr.height() / 2.0
             if rx > 0 and ry > 0:
                 normalized_dist = ((target_point.x() - cx) / rx)**2 + ((target_point.y() - cy) / ry)**2
                 if normalized_dist <= 1.2: return ('roi', i)
@@ -113,10 +115,8 @@ class ImageCanvas(QWidget):
         if self.hu_grid is None: return "N/A"
         h, w = self.hu_grid.shape
         norm_rect = rect.normalized()
-        x = int(norm_rect.x())
-        y = int(norm_rect.y())
-        rw = int(norm_rect.width())
-        rh = int(norm_rect.height())
+        x = int(norm_rect.x()); y = int(norm_rect.y())
+        rw = int(norm_rect.width()); rh = int(norm_rect.height())
         if rw <= 0 or rh <= 0: return "N/A"
         x_start = max(0, x); y_start = max(0, y)
         x_end = min(w, x + rw + 1); y_end = min(h, y + rh + 1)
@@ -140,81 +140,56 @@ class ImageCanvas(QWidget):
             area_mm2 = len(roi_values) 
         return mean_val, std_val, max_val, min_val, area_mm2
 
-    # --- 座標変換 (アスペクト比対応) ---
     def screen_to_image(self, screen_pos):
         if self.pixmap is None: return None
         win_w, win_h = self.width(), self.height()
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
-        
-        # ★アスペクト比を考慮した表示サイズ計算
-        # 画像の高さを「見かけ上」target_aspect_ratio倍にする
-        display_img_h = img_h * self.target_aspect_ratio
-        
-        # フィッティング計算
-        scale = min(win_w / img_w, win_h / display_img_h)
+        scale = min(win_w / img_w, win_h / img_h)
         draw_w = int(img_w * scale)
-        draw_h = int(display_img_h * scale)
-        
+        draw_h = int(img_h * scale)
         offset_x = (win_w - draw_w) // 2 + self.pan_x
         offset_y = (win_h - draw_h) // 2 + self.pan_y
-        
-        # 逆変換
         img_x = (screen_pos.x() - offset_x) / scale
         img_y = (screen_pos.y() - offset_y) / scale
-        
-        # Y軸はアスペクト比で割って元の画像座標に戻す
-        img_y = img_y / self.target_aspect_ratio
-        
         return QPointF(img_x, img_y)
 
     def image_to_screen(self, img_point):
         if self.pixmap is None: return QPointF(0,0)
         win_w, win_h = self.width(), self.height()
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
-        
-        display_img_h = img_h * self.target_aspect_ratio
-        scale = min(win_w / img_w, win_h / display_img_h)
-        draw_w = int(img_w * scale)
-        draw_h = int(display_img_h * scale)
-        
+        scale = min(win_w / img_w, win_h / img_h)
+        draw_w, draw_h = int(img_w * scale), int(img_h * scale)
         offset_x = (win_w - draw_w) // 2 + self.pan_x
         offset_y = (win_h - draw_h) // 2 + self.pan_y
-        
         scr_x = img_point.x() * scale + offset_x
-        # Y軸にアスペクト比を掛ける
-        scr_y = (img_point.y() * self.target_aspect_ratio) * scale + offset_y
-        
+        scr_y = img_point.y() * scale + offset_y
         return QPointF(scr_x, scr_y)
 
+    # --- 描画イベント ---
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
+
         if self.pixmap is None:
             painter.setPen(QColor("#003300"))
             painter.setFont(QFont("Consolas", 14))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "[ NO SIGNAL ]")
             return
 
+        # 1. 画像描画
         win_w, win_h = self.width(), self.height()
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
-        
-        # ★描画サイズ計算 (アスペクト比反映)
-        display_img_h = img_h * self.target_aspect_ratio
-        scale = min(win_w / img_w, win_h / display_img_h)
-        draw_w = int(img_w * scale)
-        draw_h = int(display_img_h * scale)
-
+        scale = min(win_w / img_w, win_h / img_h)
+        draw_w, draw_h = int(img_w * scale), int(img_h * scale)
         offset_x = (win_w - draw_w) // 2 + self.pan_x
         offset_y = (win_h - draw_h) // 2 + self.pan_y
+        painter.drawPixmap(int(offset_x), int(offset_y), int(draw_w), int(draw_h), self.pixmap)
 
-        # 画像描画 (指定した矩形に引き伸ばして描画される)
-        target_rect = QRectF(float(offset_x), float(offset_y), float(draw_w), float(draw_h))
-        # source_rect = QRectF(0, 0, img_w, img_h)
-        # drawPixmap(target, pixmap, source)
-        painter.drawPixmap(target_rect.toRect(), self.pixmap)
+        # 2. オーバーレイ(HUD)描画
+        self.draw_overlays(painter)
 
+        # 3. 計測描画
         painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-
         for i, m in enumerate(self.measurements):
             if m.get('slice_index', -1) != self.current_slice_index: continue
             is_selected = (self.selected_type == 'ruler' and i == self.selected_index)
@@ -236,13 +211,9 @@ class ImageCanvas(QWidget):
         if self.current_drawing_start and self.current_drawing_end:
             p1 = self.image_to_screen(self.current_drawing_start)
             p2 = self.image_to_screen(self.current_drawing_end)
-            
             if self.current_mode == 'ruler':
                 dx_px = self.current_drawing_end.x() - self.current_drawing_start.x()
                 dy_px = self.current_drawing_end.y() - self.current_drawing_start.y()
-                # アスペクト比を考慮した距離計算は非常に複雑になるため、
-                # MPR時は簡易的にピクセル距離、または軸ごとのSpacingを考慮する必要がある。
-                # 現状は簡易実装とする。
                 dist_px = math.sqrt(dx_px**2 + dy_px**2)
                 if self.pixel_spacing:
                     dist_mm = dist_px * self.pixel_spacing[0] 
@@ -250,7 +221,6 @@ class ImageCanvas(QWidget):
                 else:
                     text = f"{dist_px:.1f} px"
                 self.draw_ruler(painter, p1, p2, text, QColor("#FFFF00"))
-                
             elif self.current_mode == 'roi':
                 rect_img = QRectF(self.current_drawing_start, self.current_drawing_end).normalized()
                 rect_scr = QRectF(p1, p2).normalized()
@@ -261,6 +231,48 @@ class ImageCanvas(QWidget):
                 else:
                     text = "..."
                 self.draw_roi(painter, rect_scr, text, QColor("#00FFFF"))
+
+    # ★追加: オーバーレイ描画ロジック
+    def draw_overlays(self, painter):
+        # フォント設定 (医療用っぽく等幅で少し大きめ)
+        font = QFont("Consolas", 11, QFont.Weight.Bold)
+        painter.setFont(font)
+        
+        # 余白
+        margin_x = 10
+        margin_y = 10
+        line_height = 18
+        
+        win_w = self.width()
+        win_h = self.height()
+        
+        # 共通の描画関数
+        def draw_lines(lines, align_x, align_y):
+            for i, text in enumerate(lines):
+                if not text: continue
+                # テキストサイズ計測
+                fm = QFontMetrics(font)
+                text_w = fm.horizontalAdvance(text)
+                
+                # 位置計算
+                if align_x == 'left': x = margin_x
+                else: x = win_w - margin_x - text_w
+                
+                if align_y == 'top': y = margin_y + (i + 1) * line_height
+                else: y = win_h - margin_y - (len(lines) - 1 - i) * line_height
+                
+                # 影 (黒)
+                painter.setPen(QColor("#000000"))
+                painter.drawText(int(x)+1, int(y)+1, text)
+                # 本体 (白) - 標準的な医療ビューアー色
+                painter.setPen(QColor("#FFFFFF"))
+                painter.drawText(int(x), int(y), text)
+
+        # 4隅に描画
+        draw_lines(self.overlay_data['TL'], 'left', 'top')
+        draw_lines(self.overlay_data['TR'], 'right', 'top')
+        draw_lines(self.overlay_data['BL'], 'left', 'bottom')
+        draw_lines(self.overlay_data['BR'], 'right', 'bottom')
 
     def draw_ruler(self, painter, p1, p2, text, color):
         pen = QPen(color); pen.setWidth(2); painter.setPen(pen)
