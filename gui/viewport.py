@@ -1,7 +1,8 @@
 import numpy as np
 import pydicom
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
-from PyQt6.QtCore import Qt, pyqtSignal, QRect
+# ★修正: QRectF を追加しました
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QRectF
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette
 
 from gui.canvas import ImageCanvas
@@ -9,12 +10,14 @@ from core.loader import SeriesLoadWorker
 
 class ZetaViewport(QFrame):
     # シグナル定義
-    # modifiers: キーボード修飾キー (Ctrlなど) を伝える
-    activated = pyqtSignal(object, object) 
+    activated = pyqtSignal(object, object)
     series_dropped = pyqtSignal(object, str)
     
-    # ★追加: スクロール通知 (自分自身, 移動量ステップ)
-    scrolled = pyqtSignal(object, int)
+    # 同期用シグナル
+    scrolled = pyqtSignal(object, int)          # ページング
+    panned = pyqtSignal(object, int, int)       # パン (dx, dy)
+    wl_changed = pyqtSignal(object, float, float) # WL/WW (delta_width, delta_level)
+    zoomed = pyqtSignal(object, float)          # ズーム (delta_factor)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,6 +53,41 @@ class ZetaViewport(QFrame):
         else:
             self.setStyleSheet("border: 1px solid #333333;")
 
+    # --- 外部からの操作適用 (同期用) ---
+    def apply_scroll(self, steps):
+        if not self.current_slices: return
+        new_index = int(np.clip(self.current_index + steps, 0, len(self.current_slices) - 1))
+        if new_index != self.current_index:
+            self.current_index = new_index
+            self.update_display()
+
+    # --- scroll_step (Main Windowからの呼び出し互換) ---
+    def scroll_step(self, steps, emit_sync=True):
+        if not self.current_slices: return
+        new_index = int(np.clip(self.current_index + steps, 0, len(self.current_slices) - 1))
+        
+        if new_index != self.current_index:
+            self.current_index = new_index
+            self.update_display()
+            if emit_sync:
+                self.scrolled.emit(self, steps)
+
+    def apply_pan(self, dx, dy):
+        self.canvas.pan_x += dx
+        self.canvas.pan_y += dy
+        self.canvas.update()
+
+    def apply_wl(self, dw, dl):
+        self.window_width = max(1, self.window_width + dw)
+        self.window_level += dl
+        self.update_display()
+
+    def apply_zoom(self, delta_factor):
+        if hasattr(self.canvas, 'zoom_factor'):
+            new_zoom = self.canvas.zoom_factor + delta_factor
+            self.canvas.zoom_factor = max(0.1, min(10.0, new_zoom))
+            self.canvas.update()
+
     # --- ドラッグ＆ドロップ ---
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-zeta-series-uid"):
@@ -82,6 +120,7 @@ class ZetaViewport(QFrame):
         return self.canvas.delete_selected_measurement()
 
     def load_series(self, file_paths):
+        if 'BL' not in self.canvas.overlay_data: self.canvas.overlay_data['BL'] = []
         self.canvas.overlay_data['BL'] = ["LOADING..."]
         self.canvas.update()
         if self.load_worker and self.load_worker.isRunning():
@@ -124,7 +163,14 @@ class ZetaViewport(QFrame):
             h, w = img_norm.shape
             q_img = QImage(img_norm.data.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
             pixmap = QPixmap.fromImage(q_img)
+            
             overlay_info = self.create_overlay_info(ds)
+            # ズーム倍率表示
+            if hasattr(self.canvas, 'zoom_factor'):
+                zoom = self.canvas.zoom_factor
+                if 'BL' in overlay_info:
+                    overlay_info['BL'].append(f"Zoom: {zoom:.1f}x")
+            
             self.canvas.set_pixmap(pixmap, self.canvas.pixel_spacing, self.current_index, hu_image, overlay_data=overlay_info)
         except Exception as e:
             print(f"Render Error: {e}")
@@ -144,13 +190,18 @@ class ZetaViewport(QFrame):
             'BR': [wl_info]
         }
 
+    # --- イベントハンドリング ---
     def mousePressEvent(self, event):
-        # ★変更: 修飾キー(Ctrl等)も通知する
         self.activated.emit(self, event.modifiers())
-        
         self.last_mouse_pos = event.position()
         self.drag_accumulator = 0
-        if self.current_tool_mode in [1, 2] and (event.buttons() & Qt.MouseButton.LeftButton):
+        
+        buttons = event.buttons()
+        # ズーム操作(左右同時)の場合はツール描画を開始しない
+        if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton):
+            return
+
+        if self.current_tool_mode in [1, 2] and (buttons & Qt.MouseButton.LeftButton):
             canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
             hit_type, hit_index = self.canvas.hit_test(canvas_pos)
             if hit_index is not None:
@@ -172,23 +223,37 @@ class ZetaViewport(QFrame):
         current_pos = event.position()
         delta_x = current_pos.x() - self.last_mouse_pos.x()
         delta_y = current_pos.y() - self.last_mouse_pos.y()
-        if self.current_tool_mode in [1, 2] and (event.buttons() & Qt.MouseButton.LeftButton):
+        buttons = event.buttons()
+
+        # 1. ズーム (左+右ドラッグ)
+        if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton):
+            zoom_delta = -delta_y * 0.01 
+            self.apply_zoom(zoom_delta)
+            self.zoomed.emit(self, zoom_delta) # 同期通知
+
+        # 2. ツール描画
+        elif self.current_tool_mode in [1, 2] and (buttons & Qt.MouseButton.LeftButton):
              if self.canvas.current_drawing_start:
                 canvas_pos = self.canvas.mapFrom(self, current_pos.toPoint())
                 img_pos = self.canvas.screen_to_image(canvas_pos)
                 if img_pos:
                     self.canvas.current_drawing_end = img_pos
                     self.canvas.update()
-        elif event.buttons() & Qt.MouseButton.RightButton:
-            self.window_width = max(1, self.window_width + delta_x)
-            self.window_level += delta_y
-            self.update_display()
-        elif event.buttons() & Qt.MouseButton.MiddleButton:
-            self.paging_drag(delta_y) # ページング
-        elif self.current_tool_mode == 0 and (event.buttons() & Qt.MouseButton.LeftButton):
-            self.canvas.pan_x += delta_x
-            self.canvas.pan_y += delta_y
-            self.canvas.update()
+        
+        # 3. W/L調整
+        elif buttons & Qt.MouseButton.RightButton:
+            self.apply_wl(delta_x, delta_y)
+            self.wl_changed.emit(self, delta_x, delta_y) # 同期通知
+        
+        # 4. ページング (中ドラッグ)
+        elif buttons & Qt.MouseButton.MiddleButton:
+            self.paging_drag(delta_y)
+        
+        # 5. パン (NAVモードのみ)
+        elif self.current_tool_mode == 0 and (buttons & Qt.MouseButton.LeftButton):
+            self.apply_pan(delta_x, delta_y)
+            self.panned.emit(self, delta_x, delta_y) # 同期通知
+            
         self.last_mouse_pos = current_pos
 
     def mouseReleaseEvent(self, event):
@@ -218,7 +283,6 @@ class ZetaViewport(QFrame):
                 c.current_drawing_start = None; c.current_drawing_end = None; c.update()
         self.last_mouse_pos = None
 
-    # --- ページング処理 (マウスドラッグ) ---
     def paging_drag(self, dy):
         if self.current_slices:
             self.drag_accumulator += dy
@@ -226,26 +290,11 @@ class ZetaViewport(QFrame):
             if abs(self.drag_accumulator) > threshold:
                 steps = int(self.drag_accumulator / threshold)
                 if steps != 0:
-                    # 外部へ通知 (emit_sync=True)
                     self.scroll_step(steps, emit_sync=True)
                     self.drag_accumulator -= (steps * threshold)
 
-    # --- ページング処理 (ホイール) ---
     def wheelEvent(self, event):
         if not self.current_slices: return
         delta = event.angleDelta().y()
-        steps = 1 if delta < 0 else -1 # ホイールの向き調整
+        steps = 1 if delta < 0 else -1
         self.scroll_step(steps, emit_sync=True)
-
-    # --- ★追加: スクロール実行コア関数 ---
-    # emit_sync=False にするとシグナルを出さない（無限ループ防止）
-    def scroll_step(self, steps, emit_sync=True):
-        if not self.current_slices: return
-        
-        new_index = int(np.clip(self.current_index + steps, 0, len(self.current_slices) - 1))
-        if new_index != self.current_index:
-            self.current_index = new_index
-            self.update_display()
-            
-            if emit_sync:
-                self.scrolled.emit(self, steps)
