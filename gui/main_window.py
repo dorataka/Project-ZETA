@@ -9,7 +9,6 @@ from PyQt6.QtGui import QKeyEvent, QDrag
 from gui.viewport import ZetaViewport
 from core.loader import DicomScanWorker
 
-# ドラッグ可能なリスト (変更なし)
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,7 +24,6 @@ class DraggableListWidget(QListWidget):
         drag.setMimeData(mime)
         drag.exec(supportedActions)
 
-# --- メインウィンドウ ---
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -54,7 +52,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # 1. グリッド設定
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
         self.grid_ctrl_layout = QHBoxLayout()
@@ -69,11 +66,8 @@ class ZetaViewer(QMainWindow):
         self.grid_ctrl_layout.addWidget(self.btn_apply_grid)
         self.left_layout.addLayout(self.grid_ctrl_layout)
         
-        # ★削除: SYNCボタンを削除しました
-        
         self.left_layout.addSpacing(20)
 
-        # 2. ツールモード
         self.mode_label = QLabel("CONTROLLER MODE")
         self.left_layout.addWidget(self.mode_label)
         self.btn_nav = QPushButton("NAVIGATE")
@@ -90,7 +84,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_nav); self.left_layout.addWidget(self.btn_ruler); self.left_layout.addWidget(self.btn_roi)
         self.left_layout.addSpacing(20)
         
-        # 3. シリーズリスト
         self.series_label = QLabel("SERIES LIST (Drag or Click)")
         self.left_layout.addWidget(self.series_label)
         self.series_list_widget = DraggableListWidget()
@@ -103,7 +96,6 @@ class ZetaViewer(QMainWindow):
         
         self.main_layout.addWidget(self.left_panel)
 
-        # 右パネル (グリッド)
         self.right_panel = QWidget()
         self.grid_layout = QGridLayout(self.right_panel)
         self.grid_layout.setContentsMargins(0,0,0,0)
@@ -146,22 +138,21 @@ class ZetaViewer(QMainWindow):
                 vp = ZetaViewport()
                 vp.activated.connect(self.on_viewport_activated)
                 vp.series_dropped.connect(self.on_viewport_series_dropped)
+                # ★追加: 各種操作シグナルを接続
                 vp.scrolled.connect(self.on_viewport_scrolled)
+                vp.panned.connect(self.on_viewport_panned)
+                vp.wl_changed.connect(self.on_viewport_wl_changed)
+                vp.zoomed.connect(self.on_viewport_zoomed)
                 
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
         
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
-    # --- ★変更: ビューポート選択ロジック (Shiftキー対応) ---
     def on_viewport_activated(self, viewport, modifiers):
-        # Shiftキーが押されているか確認
         is_shift = (modifiers & Qt.KeyboardModifier.ShiftModifier)
-        
         if is_shift:
-            # Shiftキー: 選択のトグル (追加/削除)
             if viewport in self.selected_viewports:
-                # 既に選択されていて、かつそれが「最後の1個」でなければ解除
                 if len(self.selected_viewports) > 1:
                     viewport.set_active(False)
                     self.selected_viewports.remove(viewport)
@@ -169,9 +160,7 @@ class ZetaViewer(QMainWindow):
                 viewport.set_active(True)
                 self.selected_viewports.add(viewport)
         else:
-            # 通常クリック: 排他選択 (他をクリアしてこれだけ選ぶ)
             self.select_single_viewport(viewport)
-            
         self.apply_tool_mode_to_selected()
 
     def select_single_viewport(self, viewport):
@@ -180,13 +169,22 @@ class ZetaViewer(QMainWindow):
         self.selected_viewports = {viewport}
         viewport.set_active(True)
 
-    # --- ★変更: 同期スクロールロジック (常時同期) ---
-    def on_viewport_scrolled(self, sender_viewport, steps):
-        # 選択されている他のビューポートにも同じスクロールを指示 (ボタンチェックを削除)
+    # --- ★重要: 全操作の同期ハンドラ ---
+    def on_viewport_scrolled(self, sender, steps):
         for vp in self.selected_viewports:
-            if vp != sender_viewport:
-                # emit_sync=False にして無限ループを防ぐ
-                vp.scroll_step(steps, emit_sync=False)
+            if vp != sender: vp.scroll_step(steps, emit_sync=False)
+
+    def on_viewport_panned(self, sender, dx, dy):
+        for vp in self.selected_viewports:
+            if vp != sender: vp.apply_pan(dx, dy)
+
+    def on_viewport_wl_changed(self, sender, dw, dl):
+        for vp in self.selected_viewports:
+            if vp != sender: vp.apply_wl(dw, dl)
+
+    def on_viewport_zoomed(self, sender, delta_factor):
+        for vp in self.selected_viewports:
+            if vp != sender: vp.apply_zoom(delta_factor)
 
     def on_viewport_series_dropped(self, target_viewport, uid):
         self.select_single_viewport(target_viewport)
@@ -204,7 +202,6 @@ class ZetaViewer(QMainWindow):
         elif mode == 2:
             self.mode_label.setText("CONTROLLER MODE (ROI)")
             self.mode_label.setStyleSheet("color: #00FFFF;")
-        
         self.apply_tool_mode_to_selected(mode)
 
     def apply_tool_mode_to_selected(self, mode=None):
@@ -228,7 +225,6 @@ class ZetaViewer(QMainWindow):
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
-            # 選択中の全ビューポートに対して削除実行
             for vp in self.selected_viewports:
                 vp.delete_measurement()
         super().keyPressEvent(event)
@@ -258,11 +254,9 @@ class ZetaViewer(QMainWindow):
         if not self.selected_viewports:
             QMessageBox.warning(self, "Info", "No viewport selected.")
             return
-        
         uid = item.data(Qt.ItemDataRole.UserRole)
         if uid in self.all_series_data:
             files = self.all_series_data[uid]['files']
-            # 全選択ビューポートにロード
             for vp in self.selected_viewports:
                 vp.load_series(files)
 

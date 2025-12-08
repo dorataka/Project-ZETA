@@ -23,7 +23,7 @@ class ImageCanvas(QWidget):
         self.pan_x = 0
         self.pan_y = 0
         
-        # ★追加: ズーム倍率 (1.0 = ウィンドウフィット)
+        # ズーム倍率 (1.0 = ウィンドウフィット)
         self.zoom_factor = 1.0
         
         self.measurements = []
@@ -38,7 +38,6 @@ class ImageCanvas(QWidget):
         self.current_slice_index = 0
         
         self.overlay_data = {'TL': [], 'TR': [], 'BL': [], 'BR': []}
-        # MPR用アスペクト比 (通常は1.0)
         self.target_aspect_ratio = 1.0
 
         self.setStyleSheet("background-color: #000000;")
@@ -56,7 +55,7 @@ class ImageCanvas(QWidget):
     def reset_view(self):
         self.pan_x = 0
         self.pan_y = 0
-        self.zoom_factor = 1.0 # リセット時に等倍に戻す
+        self.zoom_factor = 1.0
         self.measurements = []
         self.rois = []
         self.selected_index = None
@@ -66,27 +65,28 @@ class ImageCanvas(QWidget):
         self.target_aspect_ratio = 1.0
         self.update()
 
-    # --- ★重要: 座標変換の共通ロジック (ズーム対応) ---
+    # --- 座標変換ロジック (安全装置付き) ---
     def get_scale_and_offset(self):
         if self.pixmap is None: return 1.0, 0, 0
+        
+        # 異常値のリセット (NaN/Inf対策)
+        if math.isnan(self.zoom_factor) or math.isinf(self.zoom_factor) or self.zoom_factor <= 0.001:
+            self.zoom_factor = 1.0
+        if math.isnan(self.pan_x) or math.isinf(self.pan_x): self.pan_x = 0
+        if math.isnan(self.pan_y) or math.isinf(self.pan_y): self.pan_y = 0
         
         win_w, win_h = self.width(), self.height()
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
         
-        # アスペクト比考慮後の画像の高さ
         display_h = img_h * self.target_aspect_ratio
+        if display_h == 0: display_h = 1 # 0除算防止
         
-        # 基本スケール (ウィンドウにフィットさせる倍率)
         base_scale = min(win_w / img_w, win_h / display_h)
-        
-        # ★最終スケール (ズーム倍率を掛ける)
         final_scale = base_scale * self.zoom_factor
         
-        # 描画サイズ
         draw_w = img_w * final_scale
         draw_h = display_h * final_scale
         
-        # 中央寄せ + パン
         offset_x = (win_w - draw_w) / 2 + self.pan_x
         offset_y = (win_h - draw_h) / 2 + self.pan_y
         
@@ -95,12 +95,10 @@ class ImageCanvas(QWidget):
     def screen_to_image(self, screen_pos):
         if self.pixmap is None: return None
         scale, off_x, off_y = self.get_scale_and_offset()
+        if scale <= 0: return None
         
-        # スクリーン -> 画像座標
         img_x = (screen_pos.x() - off_x) / scale
         img_y = (screen_pos.y() - off_y) / scale
-        
-        # アスペクト比の逆補正
         img_y = img_y / self.target_aspect_ratio
         
         return QPointF(img_x, img_y)
@@ -109,9 +107,7 @@ class ImageCanvas(QWidget):
         if self.pixmap is None: return QPointF(0,0)
         scale, off_x, off_y = self.get_scale_and_offset()
         
-        # 画像 -> スクリーン座標
         scr_x = img_point.x() * scale + off_x
-        # アスペクト比補正
         scr_y = (img_point.y() * self.target_aspect_ratio) * scale + off_y
         
         return QPointF(scr_x, scr_y)
@@ -127,19 +123,21 @@ class ImageCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "[ NO SIGNAL ]")
             return
 
+        if self.pixmap.isNull():
+            return # 何も描画しない
+
         scale, off_x, off_y = self.get_scale_and_offset()
         
-        # 画像描画
+        # 極小サイズなら描画スキップ (負荷軽減)
+        if scale <= 0.001: return
+
         img_w = self.pixmap.width()
         img_h = self.pixmap.height()
         
-        # ターゲット矩形 (表示先)
-        # float型で正確に計算
         draw_w = img_w * scale
         draw_h = (img_h * self.target_aspect_ratio) * scale
         target_rect = QRectF(off_x, off_y, draw_w, draw_h)
         
-        # 補間設定 (ズーム時に綺麗に見えるように)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(target_rect.toRect(), self.pixmap)
 
@@ -166,13 +164,13 @@ class ImageCanvas(QWidget):
             rect_scr = QRectF(top_left, bottom_right)
             self.draw_roi(painter, rect_scr, roi['text'], color)
 
+        # ドラッグ中の描画
         if self.current_drawing_start and self.current_drawing_end:
             p1 = self.image_to_screen(self.current_drawing_start)
             p2 = self.image_to_screen(self.current_drawing_end)
             if self.current_mode == 'ruler':
                 dx_img = self.current_drawing_end.x() - self.current_drawing_start.x()
                 dy_img = self.current_drawing_end.y() - self.current_drawing_start.y()
-                # 簡易距離計算 (アスペクト比考慮)
                 dist_px = math.sqrt(dx_img**2 + (dy_img * self.target_aspect_ratio)**2)
                 
                 if self.pixel_spacing:
@@ -197,6 +195,7 @@ class ImageCanvas(QWidget):
         painter.setFont(font)
         margin_x = 10; margin_y = 10; line_height = 18
         win_w = self.width(); win_h = self.height()
+        
         def draw_lines(lines, align_x, align_y):
             for i, text in enumerate(lines):
                 if not text: continue
@@ -207,6 +206,7 @@ class ImageCanvas(QWidget):
                 else: y = win_h - margin_y - (len(lines) - 1 - i) * line_height
                 painter.setPen(QColor("#000000")); painter.drawText(int(x)+1, int(y)+1, text)
                 painter.setPen(QColor("#FFFFFF")); painter.drawText(int(x), int(y), text)
+                
         draw_lines(self.overlay_data['TL'], 'left', 'top')
         draw_lines(self.overlay_data['TR'], 'right', 'top')
         draw_lines(self.overlay_data['BL'], 'left', 'bottom')
@@ -238,7 +238,6 @@ class ImageCanvas(QWidget):
     def hit_test(self, screen_pos):
         if isinstance(screen_pos, QPoint): target_point = QPointF(screen_pos)
         else: target_point = screen_pos
-        threshold = 8.0
         for i, roi in enumerate(self.rois):
             if roi.get('slice_index', -1) != self.current_slice_index: continue
             rect_img = roi['rect']
@@ -256,7 +255,7 @@ class ImageCanvas(QWidget):
             p1 = self.image_to_screen(m['start'])
             p2 = self.image_to_screen(m['end'])
             dist = distance_point_to_segment(target_point, p1, p2)
-            if dist < threshold and dist < min_dist:
+            if dist < 8.0 and dist < min_dist:
                 min_dist = dist; closest_ruler = i
         if closest_ruler is not None: return ('ruler', closest_ruler)
         return (None, None)
