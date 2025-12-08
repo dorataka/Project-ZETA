@@ -1,11 +1,11 @@
 import os
 from PyQt6.QtWidgets import (QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, 
                              QPushButton, QMessageBox, QListWidget, QListWidgetItem, 
-                             QButtonGroup, QGridLayout, QSpinBox, QFrame)
+                             QButtonGroup, QGridLayout, QSpinBox, QFrame, QProgressBar,
+                             QFileDialog)
 from PyQt6.QtCore import Qt, QPoint, QMimeData, QByteArray
 from PyQt6.QtGui import QKeyEvent, QDrag
 
-# 自作モジュール
 from gui.viewport import ZetaViewport
 from core.loader import DicomScanWorker
 
@@ -27,17 +27,14 @@ class DraggableListWidget(QListWidget):
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Project Z.E.T.A. - Synchronized Grid System")
+        self.setWindowTitle("Project Z.E.T.A. - Hybrid Viewer")
         self.resize(1600, 900)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        
         self.all_series_data = {} 
         self.viewports = [] 
         self.selected_viewports = set()
-        
         self.scan_worker = None
-
         self.setup_ui()
         self.apply_styles()
         self.update_grid_layout(1, 1)
@@ -47,47 +44,68 @@ class ZetaViewer(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
 
-        # 左パネル
         self.left_panel = QWidget()
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # グリッド設定
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
         self.grid_ctrl_layout = QHBoxLayout()
         self.spin_rows = QSpinBox(); self.spin_rows.setRange(1, 5); self.spin_rows.setValue(1)
         self.spin_cols = QSpinBox(); self.spin_cols.setRange(1, 5); self.spin_cols.setValue(1)
-        self.spin_rows.setPrefix("R:")
-        self.spin_cols.setPrefix("C:")
+        self.spin_rows.setPrefix("R:"); self.spin_cols.setPrefix("C:")
         self.btn_apply_grid = QPushButton("APPLY")
         self.btn_apply_grid.clicked.connect(self.on_apply_grid_clicked)
         self.grid_ctrl_layout.addWidget(self.spin_rows)
         self.grid_ctrl_layout.addWidget(self.spin_cols)
         self.grid_ctrl_layout.addWidget(self.btn_apply_grid)
         self.left_layout.addLayout(self.grid_ctrl_layout)
-        
         self.left_layout.addSpacing(20)
 
-        # ツールモード
+        self.mpr_label = QLabel("3D RECONSTRUCTION")
+        self.left_layout.addWidget(self.mpr_label)
+        self.btn_mpr_enable = QPushButton("ENABLE MPR MODE")
+        self.btn_mpr_enable.setCheckable(True)
+        self.btn_mpr_enable.clicked.connect(self.toggle_mpr_mode)
+        self.left_layout.addWidget(self.btn_mpr_enable)
+        
+        self.mpr_btns_layout = QHBoxLayout()
+        self.btn_axial = QPushButton("AXIAL"); self.btn_axial.setCheckable(True); self.btn_axial.setChecked(True)
+        self.btn_axial.clicked.connect(lambda: self.set_mpr_plane('Axial'))
+        self.btn_coronal = QPushButton("COR"); self.btn_coronal.setCheckable(True)
+        self.btn_coronal.clicked.connect(lambda: self.set_mpr_plane('Coronal'))
+        self.btn_sagittal = QPushButton("SAG"); self.btn_sagittal.setCheckable(True)
+        self.btn_sagittal.clicked.connect(lambda: self.set_mpr_plane('Sagittal'))
+        self.mpr_group = QButtonGroup(self)
+        self.mpr_group.addButton(self.btn_axial); self.mpr_group.addButton(self.btn_coronal); self.mpr_group.addButton(self.btn_sagittal)
+        self.mpr_btns_layout.addWidget(self.btn_axial); self.mpr_btns_layout.addWidget(self.btn_coronal); self.mpr_btns_layout.addWidget(self.btn_sagittal)
+        self.left_layout.addLayout(self.mpr_btns_layout)
+        self.update_mpr_buttons_state(False)
+        self.left_layout.addSpacing(20)
+
+        # プログレスバー
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #555; border-radius: 3px; text-align: center; } QProgressBar::chunk { background-color: #00FF00; }")
+        self.left_layout.addWidget(self.progress_bar)
+        self.left_layout.addSpacing(10)
+
         self.mode_label = QLabel("CONTROLLER MODE")
         self.left_layout.addWidget(self.mode_label)
-        self.btn_nav = QPushButton("NAVIGATE")
-        self.btn_nav.setCheckable(True); self.btn_nav.setChecked(True)
+        self.btn_nav = QPushButton("NAVIGATE"); self.btn_nav.setCheckable(True); self.btn_nav.setChecked(True)
         self.btn_nav.clicked.connect(lambda: self.set_mode(0))
-        self.btn_ruler = QPushButton("RULER (DIST)")
-        self.btn_ruler.setCheckable(True)
+        self.btn_ruler = QPushButton("RULER"); self.btn_ruler.setCheckable(True)
         self.btn_ruler.clicked.connect(lambda: self.set_mode(1))
-        self.btn_roi = QPushButton("ROI (ELLIPSE)")
-        self.btn_roi.setCheckable(True)
+        self.btn_roi = QPushButton("ROI"); self.btn_roi.setCheckable(True)
         self.btn_roi.clicked.connect(lambda: self.set_mode(2))
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.btn_nav); self.mode_group.addButton(self.btn_ruler); self.mode_group.addButton(self.btn_roi)
         self.left_layout.addWidget(self.btn_nav); self.left_layout.addWidget(self.btn_ruler); self.left_layout.addWidget(self.btn_roi)
         self.left_layout.addSpacing(20)
         
-        # シリーズリスト
-        self.series_label = QLabel("SERIES LIST (Drag or Click)")
+        self.series_label = QLabel("SERIES LIST")
         self.left_layout.addWidget(self.series_label)
         self.series_list_widget = DraggableListWidget()
         self.series_list_widget.itemClicked.connect(self.on_series_clicked) 
@@ -99,7 +117,6 @@ class ZetaViewer(QMainWindow):
         
         self.main_layout.addWidget(self.left_panel)
 
-        # 右パネル (グリッド)
         self.right_panel = QWidget()
         self.grid_layout = QGridLayout(self.right_panel)
         self.grid_layout.setContentsMargins(0,0,0,0)
@@ -119,47 +136,80 @@ class ZetaViewer(QMainWindow):
             }
             QPushButton:hover { background-color: #003300; }
             QPushButton:checked { background-color: #FFFF00; color: #000000; border: 1px solid #FFFF00; }
+            QPushButton:disabled { background-color: #111; color: #555; border: 1px solid #333; }
             QSpinBox {
                 background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 5px; font-family: 'Consolas';
             }
         """)
 
+    def toggle_mpr_mode(self):
+        is_mpr = self.btn_mpr_enable.isChecked()
+        self.update_mpr_buttons_state(is_mpr)
+        for vp in self.selected_viewports:
+            vp.toggle_mpr(is_mpr)
+        if not is_mpr: self.btn_axial.setChecked(True)
+
+    def update_mpr_buttons_state(self, enabled):
+        self.btn_axial.setEnabled(enabled)
+        self.btn_coronal.setEnabled(enabled)
+        self.btn_sagittal.setEnabled(enabled)
+        if enabled:
+            self.mpr_label.setText("3D RECONSTRUCTION [ON]")
+            self.mpr_label.setStyleSheet("color: #FF00FF;")
+        else:
+            self.mpr_label.setText("3D RECONSTRUCTION [OFF]")
+            self.mpr_label.setStyleSheet("color: #555555;")
+
+    def set_mpr_plane(self, plane):
+        if not self.btn_mpr_enable.isChecked(): return
+        for vp in self.selected_viewports: vp.set_view_plane(plane)
+
     def on_apply_grid_clicked(self):
-        rows = self.spin_rows.value()
-        cols = self.spin_cols.value()
+        rows = self.spin_rows.value(); cols = self.spin_cols.value()
         self.update_grid_layout(rows, cols)
 
     def update_grid_layout(self, rows, cols):
         for i in reversed(range(self.grid_layout.count())): 
             widget = self.grid_layout.itemAt(i).widget()
             if widget: widget.setParent(None); widget.deleteLater()
-        
         self.viewports = []
         self.selected_viewports = set()
-
         for r in range(rows):
             for c in range(cols):
                 vp = ZetaViewport()
                 vp.activated.connect(self.on_viewport_activated)
                 vp.series_dropped.connect(self.on_viewport_series_dropped)
-                
-                # 各種操作シグナルを接続
                 vp.scrolled.connect(self.on_viewport_scrolled)
                 vp.panned.connect(self.on_viewport_panned)
                 vp.wl_changed.connect(self.on_viewport_wl_changed)
                 vp.zoomed.connect(self.on_viewport_zoomed)
                 
+                # プログレス通知
+                vp.processing_start.connect(self.on_process_start)
+                vp.processing_progress.connect(self.on_process_progress)
+                vp.processing_finish.connect(self.on_process_finish)
+                
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
-        
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
-    # --- ★重要修正: ビューポート選択ロジック ---
+    # --- プログレス制御 ---
+    def on_process_start(self, message):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.mpr_label.setText(f"BUSY: {message}")
+    
+    def on_process_progress(self, val):
+        self.progress_bar.setValue(val)
+        
+    def on_process_finish(self):
+        self.progress_bar.setVisible(False)
+        self.mpr_label.setText("3D RECONSTRUCTION [ON]")
+
+    # --- 以下、既存 ---
     def on_viewport_activated(self, viewport, modifiers):
         is_shift = (modifiers & Qt.KeyboardModifier.ShiftModifier)
-        
         if is_shift:
-            # Shiftキー: トグル動作 (追加/削除)
             if viewport in self.selected_viewports:
                 if len(self.selected_viewports) > 1:
                     viewport.set_active(False)
@@ -168,35 +218,29 @@ class ZetaViewer(QMainWindow):
                 viewport.set_active(True)
                 self.selected_viewports.add(viewport)
         else:
-            # Shiftなし:
-            # 「すでに選択されているもの」をクリックした場合は、選択解除しない (同期操作のため)
-            if viewport in self.selected_viewports:
-                pass # 維持
-            else:
-                # 未選択のものをクリックしたら、それだけの単一選択にする
-                self.select_single_viewport(viewport)
-            
+            if viewport in self.selected_viewports: pass
+            else: self.select_single_viewport(viewport)
         self.apply_tool_mode_to_selected()
+        
+        if self.selected_viewports:
+            any_mpr = any(vp.is_mpr_enabled for vp in self.selected_viewports)
+            self.btn_mpr_enable.setChecked(any_mpr)
+            self.update_mpr_buttons_state(any_mpr)
 
     def select_single_viewport(self, viewport):
-        for vp in self.viewports:
-            vp.set_active(False)
+        for vp in self.viewports: vp.set_active(False)
         self.selected_viewports = {viewport}
         viewport.set_active(True)
 
-    # --- 同期ハンドラ群 ---
     def on_viewport_scrolled(self, sender, steps):
         for vp in self.selected_viewports:
             if vp != sender: vp.scroll_step(steps, emit_sync=False)
-
     def on_viewport_panned(self, sender, dx, dy):
         for vp in self.selected_viewports:
             if vp != sender: vp.apply_pan(dx, dy)
-
     def on_viewport_wl_changed(self, sender, dw, dl):
         for vp in self.selected_viewports:
             if vp != sender: vp.apply_wl(dw, dl)
-
     def on_viewport_zoomed(self, sender, delta_factor):
         for vp in self.selected_viewports:
             if vp != sender: vp.apply_zoom(delta_factor)
@@ -208,15 +252,9 @@ class ZetaViewer(QMainWindow):
             target_viewport.load_series(files)
 
     def set_mode(self, mode):
-        if mode == 0:
-            self.mode_label.setText("CONTROLLER MODE (NAV)")
-            self.mode_label.setStyleSheet("color: #00FF00;")
-        elif mode == 1:
-            self.mode_label.setText("CONTROLLER MODE (RULER)")
-            self.mode_label.setStyleSheet("color: #FFFF00;")
-        elif mode == 2:
-            self.mode_label.setText("CONTROLLER MODE (ROI)")
-            self.mode_label.setStyleSheet("color: #00FFFF;")
+        if mode == 0: self.mode_label.setText("CONTROLLER MODE (NAV)"); self.mode_label.setStyleSheet("color: #00FF00;")
+        elif mode == 1: self.mode_label.setText("CONTROLLER MODE (RULER)"); self.mode_label.setStyleSheet("color: #FFFF00;")
+        elif mode == 2: self.mode_label.setText("CONTROLLER MODE (ROI)"); self.mode_label.setStyleSheet("color: #00FFFF;")
         self.apply_tool_mode_to_selected(mode)
 
     def apply_tool_mode_to_selected(self, mode=None):
@@ -224,56 +262,40 @@ class ZetaViewer(QMainWindow):
             if self.btn_ruler.isChecked(): mode = 1
             elif self.btn_roi.isChecked(): mode = 2
             else: mode = 0
-        for vp in self.selected_viewports:
-            vp.set_tool_mode(mode)
+        for vp in self.selected_viewports: vp.set_tool_mode(mode)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls(): event.accept()
         else: event.ignore()
-
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
             if os.path.isdir(path): self.start_folder_scan(path)
             elif os.path.isfile(path): self.start_folder_scan(os.path.dirname(path))
-
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
-            for vp in self.selected_viewports:
-                vp.delete_measurement()
+            for vp in self.selected_viewports: vp.delete_measurement()
         super().keyPressEvent(event)
-
     def open_folder_dialog(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Select DICOM Folder")
         if folder_path: self.start_folder_scan(folder_path)
-
     def start_folder_scan(self, folder_path):
-        self.series_list_widget.clear()
-        self.series_list_widget.addItem("Scanning...")
+        self.series_list_widget.clear(); self.series_list_widget.addItem("Scanning...")
         self.scan_worker = DicomScanWorker(folder_path)
         self.scan_worker.finished.connect(self.on_scan_finished)
         self.scan_worker.error.connect(self.on_worker_error)
         self.scan_worker.start()
-
     def on_scan_finished(self, series_info, message):
-        self.all_series_data = series_info
-        self.series_list_widget.clear()
+        self.all_series_data = series_info; self.series_list_widget.clear()
         for uid, info in series_info.items():
             count = len(info['files'])
             item = QListWidgetItem(f"[{info['modality']}] {info['desc']} ({count})")
-            item.setData(Qt.ItemDataRole.UserRole, uid) 
-            self.series_list_widget.addItem(item)
-
+            item.setData(Qt.ItemDataRole.UserRole, uid); self.series_list_widget.addItem(item)
     def on_series_clicked(self, item):
-        if not self.selected_viewports:
-            QMessageBox.warning(self, "Info", "No viewport selected.")
-            return
+        if not self.selected_viewports: QMessageBox.warning(self, "Info", "No viewport selected."); return
         uid = item.data(Qt.ItemDataRole.UserRole)
         if uid in self.all_series_data:
             files = self.all_series_data[uid]['files']
-            for vp in self.selected_viewports:
-                vp.load_series(files)
-
-    def on_worker_error(self, message):
-        QMessageBox.warning(self, "Error", message)
+            for vp in self.selected_viewports: vp.load_series(files)
+    def on_worker_error(self, message): QMessageBox.warning(self, "Error", message)
