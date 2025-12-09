@@ -1,5 +1,5 @@
 import os
-import re
+import re 
 from PyQt6.QtWidgets import (QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, 
                              QPushButton, QMessageBox, QListWidget, QListWidgetItem, 
                              QButtonGroup, QGridLayout, QSpinBox, QFrame, QProgressBar,
@@ -9,7 +9,6 @@ from PyQt6.QtGui import QKeyEvent, QDrag
 
 from gui.viewport import ZetaViewport
 from core.loader import DicomScanWorker
-# ★追加: 新しいグリッドボタンをインポート
 from gui.grid_selector import GridSelectionButton
 
 class DraggableListWidget(QListWidget):
@@ -51,21 +50,17 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # --- 1. Grid Layout (直感的UIに変更) ---
+        # 1. Grid
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
-        
-        # 以前のSpinBoxを削除し、新しいボタンを配置
         self.btn_grid_picker = GridSelectionButton("GRID: 1x1")
         self.btn_grid_picker.grid_changed.connect(self.update_grid_layout)
         self.left_layout.addWidget(self.btn_grid_picker)
-        
         self.left_layout.addSpacing(20)
 
         # 2. MPR & MIP Controls
         self.mpr_label = QLabel("3D RECONSTRUCTION")
         self.left_layout.addWidget(self.mpr_label)
-        
         self.btn_mpr_enable = QPushButton("ENABLE MPR MODE")
         self.btn_mpr_enable.setCheckable(True)
         self.btn_mpr_enable.clicked.connect(self.toggle_mpr_mode)
@@ -83,25 +78,19 @@ class ZetaViewer(QMainWindow):
         self.mpr_btns_layout.addWidget(self.btn_axial); self.mpr_btns_layout.addWidget(self.btn_coronal); self.mpr_btns_layout.addWidget(self.btn_sagittal)
         self.left_layout.addLayout(self.mpr_btns_layout)
 
-        # MIP/MinIP 設定
         self.mip_layout = QHBoxLayout()
         self.combo_mip_mode = QComboBox()
         self.combo_mip_mode.addItems(["AVG", "MIP", "MinIP"])
         self.combo_mip_mode.currentIndexChanged.connect(self.update_mip_settings)
-        
         self.combo_thickness = QComboBox()
         self.combo_thickness.setEditable(True) 
         presets = [f"{i} mm" for i in range(8)] 
         presets.extend(["10 mm", "15 mm", "20 mm", "50 mm"])
-        self.combo_thickness.addItems(presets)
-        self.combo_thickness.setCurrentText("0 mm") 
+        self.combo_thickness.addItems(presets); self.combo_thickness.setCurrentText("0 mm") 
         self.combo_thickness.editTextChanged.connect(self.update_mip_settings)
         self.combo_thickness.currentIndexChanged.connect(self.update_mip_settings)
-        
-        self.mip_layout.addWidget(self.combo_mip_mode, 4)
-        self.mip_layout.addWidget(self.combo_thickness, 6)
+        self.mip_layout.addWidget(self.combo_mip_mode, 4); self.mip_layout.addWidget(self.combo_thickness, 6)
         self.left_layout.addLayout(self.mip_layout)
-        
         self.update_mpr_buttons_state(False)
         self.left_layout.addSpacing(20)
 
@@ -148,77 +137,81 @@ class ZetaViewer(QMainWindow):
         self.setStyleSheet("""
             QMainWindow { background-color: #050505; }
             QLabel { color: #00FF00; font-family: 'Consolas'; font-weight: bold; } 
-            
-            QListWidget {
-                background-color: #111; border: 1px solid #005500; color: #00DD00; font-family: 'Consolas';
-            }
+            QListWidget { background-color: #111; border: 1px solid #005500; color: #00DD00; font-family: 'Consolas'; }
             QListWidget::item:selected { background-color: #004400; color: #FFFFFF; }
-            
-            QPushButton { 
-                background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 8px; font-family: 'Consolas'; font-weight: bold;
-            }
+            QPushButton { background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 8px; font-family: 'Consolas'; font-weight: bold; }
             QPushButton:hover { background-color: #003300; }
             QPushButton:checked { background-color: #FFFF00; color: #000000; border: 1px solid #FFFF00; }
-            QPushButton::menu-indicator { image: none; } /* メニュー矢印を消してスッキリさせる */
-            
+            QPushButton::menu-indicator { image: none; }
             QPushButton:disabled { background-color: #111; color: #555; border: 1px solid #333; }
-            
-            QComboBox {
-                background-color: #1a1a1a;
-                color: #00FF00;
-                border: 1px solid #005500;
-                padding: 5px;
-                padding-right: 20px;
-                font-family: 'Consolas';
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                border-left-width: 1px;
-                border-left-color: #005500;
-                border-left-style: solid;
-                background-color: #222;
-            }
-            QComboBox::down-arrow {
-                width: 0; height: 0; 
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #00FF00;
-                margin-right: 5px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #111;
-                color: #00FF00;
-                border: 1px solid #005500;
-                selection-background-color: #004400;
-            }
-            QComboBox QLineEdit {
-                color: #00FF00; background-color: #1a1a1a; border: none;
-            }
+            QComboBox { background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 5px; padding-right: 20px; font-family: 'Consolas'; }
+            QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 20px; border-left-width: 1px; border-left-color: #005500; border-left-style: solid; background-color: #222; }
+            QComboBox::down-arrow { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #00FF00; margin-right: 5px; }
+            QComboBox QAbstractItemView { background-color: #111; color: #00FF00; border: 1px solid #005500; selection-background-color: #004400; }
+            QComboBox QLineEdit { color: #00FF00; background-color: #1a1a1a; border: none; }
         """)
 
+    # --- ★修正: グリッド更新時に状態を維持する ---
+    def update_grid_layout(self, rows, cols):
+        # 1. 現在の各ビューポートの状態をバックアップ
+        existing_states = []
+        for vp in self.viewports:
+            existing_states.append(vp.get_state())
+
+        # 2. 既存ウィジェットの削除
+        for i in reversed(range(self.grid_layout.count())): 
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget: widget.setParent(None); widget.deleteLater()
+        
+        self.viewports = []
+        self.selected_viewports = set()
+
+        # 3. 新しいグリッド作成
+        for r in range(rows):
+            for c in range(cols):
+                vp = ZetaViewport()
+                # シグナル接続
+                vp.activated.connect(self.on_viewport_activated)
+                vp.series_dropped.connect(self.on_viewport_series_dropped)
+                vp.scrolled.connect(self.on_viewport_scrolled)
+                vp.panned.connect(self.on_viewport_panned)
+                vp.wl_changed.connect(self.on_viewport_wl_changed)
+                vp.zoomed.connect(self.on_viewport_zoomed)
+                vp.processing_start.connect(self.on_process_start)
+                vp.processing_progress.connect(self.on_process_progress)
+                vp.processing_finish.connect(self.on_process_finish)
+                
+                self.grid_layout.addWidget(vp, r, c)
+                self.viewports.append(vp)
+        
+        # 4. 状態の復元 (順番通りに流し込む)
+        for i, vp in enumerate(self.viewports):
+            if i < len(existing_states):
+                vp.restore_state(existing_states[i])
+
+        # 5. 選択状態の初期化
+        if self.viewports: self.select_single_viewport(self.viewports[0])
+
+    def on_apply_grid_clicked(self): pass # 互換性のため残存
+
+    # ... (以下のメソッドは変更なし) ...
     def update_mip_settings(self):
         mode_idx = self.combo_mip_mode.currentIndex()
         mode_str = 'AVG'
         if mode_idx == 1: mode_str = 'MIP'
         elif mode_idx == 2: mode_str = 'MinIP'
-        
         text = self.combo_thickness.currentText()
         thickness_mm = 0.0
         try:
             nums = re.findall(r"[-+]?\d*\.\d+|\d+", text)
             if nums: thickness_mm = float(nums[0])
         except: thickness_mm = 0.0
-        
-        for vp in self.selected_viewports:
-            vp.set_mip_params(mode_str, thickness_mm)
+        for vp in self.selected_viewports: vp.set_mip_params(mode_str, thickness_mm)
 
     def toggle_mpr_mode(self):
         is_mpr = self.btn_mpr_enable.isChecked()
         self.update_mpr_buttons_state(is_mpr)
-        for vp in self.selected_viewports:
-            vp.toggle_mpr(is_mpr)
+        for vp in self.selected_viewports: vp.toggle_mpr(is_mpr)
         if not is_mpr: self.btn_axial.setChecked(True)
 
     def update_mpr_buttons_state(self, enabled):
@@ -237,34 +230,6 @@ class ZetaViewer(QMainWindow):
     def set_mpr_plane(self, plane):
         if not self.btn_mpr_enable.isChecked(): return
         for vp in self.selected_viewports: vp.set_view_plane(plane)
-
-    # --- グリッド更新 (引数なし版も削除) ---
-    # `btn_grid_picker` は (rows, cols) をemitするので、それを受け取る
-    
-    def update_grid_layout(self, rows, cols):
-        for i in reversed(range(self.grid_layout.count())): 
-            widget = self.grid_layout.itemAt(i).widget()
-            if widget: widget.setParent(None); widget.deleteLater()
-        self.viewports = []
-        self.selected_viewports = set()
-        for r in range(rows):
-            for c in range(cols):
-                vp = ZetaViewport()
-                vp.activated.connect(self.on_viewport_activated)
-                vp.series_dropped.connect(self.on_viewport_series_dropped)
-                vp.scrolled.connect(self.on_viewport_scrolled)
-                vp.panned.connect(self.on_viewport_panned)
-                vp.wl_changed.connect(self.on_viewport_wl_changed)
-                vp.zoomed.connect(self.on_viewport_zoomed)
-                vp.processing_start.connect(self.on_process_start)
-                vp.processing_progress.connect(self.on_process_progress)
-                vp.processing_finish.connect(self.on_process_finish)
-                self.grid_layout.addWidget(vp, r, c)
-                self.viewports.append(vp)
-        if self.viewports: self.select_single_viewport(self.viewports[0])
-    
-    def on_apply_grid_clicked(self): # もう使わないが互換性のため残すか削除
-        pass 
 
     def on_process_start(self, message):
         self.progress_bar.setVisible(True); self.progress_bar.setValue(0); self.mpr_label.setText(f"BUSY: {message}")

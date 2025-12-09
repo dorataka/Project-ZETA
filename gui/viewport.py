@@ -64,79 +64,69 @@ class ZetaViewport(QFrame):
         if active: self.setStyleSheet("border: 2px solid #00FF00;") 
         else: self.setStyleSheet("border: 1px solid #333333;")
 
-    # --- 方向ラベル取得 ---
-    def _get_orientation_label(self, vector):
-        if not vector or len(vector) != 3: return ""
-        abs_vec = [abs(v) for v in vector]
-        dominant_axis = abs_vec.index(max(abs_vec))
-        val = vector[dominant_axis]
-        
-        # DICOM座標 (LPS)
-        if dominant_axis == 0: return "L" if val > 0 else "R"
-        if dominant_axis == 1: return "P" if val > 0 else "A"
-        if dominant_axis == 2: return "S" if val > 0 else "I"
-        return ""
+    # --- ★追加: 状態保存・復元 (グリッド変更時の維持用) ---
+    def get_state(self):
+        """現在の表示状態を辞書としてエクスポート"""
+        return {
+            'file_paths': self.current_file_paths,
+            'slices': self.current_slices,
+            'volume': self.volume_data,
+            'spacing': self.voxel_spacing,
+            'mpr_loaded': self.mpr_loaded,
+            'index': self.current_index,
+            'plane': self.view_plane,
+            'mpr_enabled': self.is_mpr_enabled,
+            'mip_mode': self.mip_mode,
+            'thickness': self.slab_thickness_mm,
+            'wl': self.window_level,
+            'ww': self.window_width,
+            'cached_wl': self._cached_wl,
+            'cached_ww': self._cached_ww,
+            # キャンバスの状態
+            'pan_x': self.canvas.pan_x,
+            'pan_y': self.canvas.pan_y,
+            'zoom': self.canvas.zoom_factor,
+            'tool_mode': self.current_tool_mode,
+            'measurements': self.canvas.measurements,
+            'rois': self.canvas.rois
+        }
 
-    # --- オーバーレイ情報作成 (デバッグ付き) ---
-    def create_overlay_info(self, ds):
-        info = {}
-        
-        # 基本情報
-        name = ""; pid = ""; date = ""; inst = ""; desc = ""
-        if ds:
-            def get_tag(tag, default=""): return str(ds.get(tag, default))
-            name = str(ds.get('PatientName', ''))
-            pid = str(ds.get('PatientID', ''))
-            sex = str(ds.get('PatientSex', ''))
-            age = str(ds.get('PatientAge', ''))
-            date = get_tag('StudyDate')
-            inst = get_tag('InstitutionName')
-            desc = get_tag('SeriesDescription')
-            info['TL'] = [name, pid, f"{sex} {age}"]
-            info['TR'] = [inst, date, desc]
-        
-        # スライス情報
-        total = self.get_max_index() + 1
-        mode_str = "Axial (2D)"
-        if self.is_mpr_enabled:
-            mode_str = f"{self.view_plane}"
-            if self.slab_thickness_mm > 0:
-                mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
-        
-        info['BL'] = [f"{mode_str}: {self.current_index + 1} / {total}", f"Zoom: {self.canvas.zoom_factor:.1f}x"]
-        info['BR'] = [f"WL: {int(self.window_level)} WW: {int(self.window_width)}"]
+    def restore_state(self, state):
+        """エクスポートされた状態を復元"""
+        if not state.get('file_paths'): return # 空データなら何もしない
 
-        # --- マーカー計算 ---
-        markers = {}
+        # データを復元 (再ロードなしでメモリ渡し)
+        self.current_file_paths = state['file_paths']
+        self.current_slices = state['slices']
+        self.volume_data = state['volume']
+        self.voxel_spacing = state['spacing']
+        self.mpr_loaded = state['mpr_loaded']
         
-        if self.is_mpr_enabled:
-            # MPRモード (固定)
-            if self.view_plane == 'Axial': markers = {'T': 'A', 'B': 'P', 'L': 'R', 'R': 'L'}
-            elif self.view_plane == 'Coronal': markers = {'T': 'S', 'B': 'I', 'L': 'R', 'R': 'L'}
-            elif self.view_plane == 'Sagittal': markers = {'T': 'S', 'B': 'I', 'L': 'A', 'R': 'P'}
+        self.current_index = state['index']
+        self.view_plane = state['plane']
+        self.is_mpr_enabled = state['mpr_enabled']
         
-        elif ds and 'ImageOrientationPatient' in ds:
-            # 2Dモード (タグから計算)
-            try:
-                iop = [float(x) for x in ds.ImageOrientationPatient]
-                row_vec = iop[0:3]
-                col_vec = iop[3:6]
-                markers['R'] = self._get_orientation_label(row_vec)
-                markers['L'] = self._get_orientation_label([-x for x in row_vec])
-                markers['B'] = self._get_orientation_label(col_vec)
-                markers['T'] = self._get_orientation_label([-x for x in col_vec])
-                # print(f"[DEBUG] 2D Markers: {markers}")
-            except Exception as e:
-                print(f"[DEBUG] Marker Calc Failed: {e}")
-        else:
-            # タグがない場合
-            # print("[DEBUG] No Orientation Tag Found")
-            pass
-            
-        info['Markers'] = markers
-        return info
+        self.mip_mode = state['mip_mode']
+        self.slab_thickness_mm = state['thickness']
+        
+        self.window_level = state['wl']
+        self.window_width = state['ww']
+        self._cached_wl = state['cached_wl']
+        self._cached_ww = state['cached_ww']
+        
+        # キャンバス設定復元
+        self.canvas.pan_x = state['pan_x']
+        self.canvas.pan_y = state['pan_y']
+        self.canvas.zoom_factor = state['zoom']
+        self.canvas.measurements = state['measurements']
+        self.canvas.rois = state['rois']
+        
+        self.current_tool_mode = state['tool_mode']
+        
+        # 画面更新
+        self.update_display()
 
-    # --- 以下、既存メソッド ---
+    # --- 以下、変更なし ---
     def set_mip_params(self, mode, thickness_mm):
         if not self.is_mpr_enabled: return
         self.mip_mode = mode
@@ -147,7 +137,9 @@ class ZetaViewport(QFrame):
         max_idx = self.get_max_index()
         self.current_index = max(0, min(self.current_index, max_idx))
         try:
-            slice_img = None; aspect_ratio = 1.0; sp_z, sp_y, sp_x = self.voxel_spacing
+            slice_img = None
+            aspect_ratio = 1.0
+            sp_z, sp_y, sp_x = self.voxel_spacing
             
             depth_spacing = 1.0
             if self.view_plane == 'Axial': depth_spacing = sp_z
@@ -192,6 +184,59 @@ class ZetaViewport(QFrame):
         if self.mip_mode == 'MIP': return np.max(slab, axis=axis)
         elif self.mip_mode == 'MinIP': return np.min(slab, axis=axis)
         else: return np.mean(slab, axis=axis)
+
+    def create_overlay_info(self, ds):
+        info = {}
+        name = ""; pid = ""; date = ""; inst = ""; desc = ""
+        if ds:
+            def get_tag(tag, default=""): return str(ds.get(tag, default))
+            name = str(ds.get('PatientName', ''))
+            pid = str(ds.get('PatientID', ''))
+            sex = str(ds.get('PatientSex', ''))
+            age = str(ds.get('PatientAge', ''))
+            date = get_tag('StudyDate')
+            inst = get_tag('InstitutionName')
+            desc = get_tag('SeriesDescription')
+            info['TL'] = [name, pid, f"{sex} {age}"]
+            info['TR'] = [inst, date, desc]
+        
+        total = self.get_max_index() + 1
+        mode_str = "Axial (2D)"
+        if self.is_mpr_enabled:
+            mode_str = f"{self.view_plane}"
+            if self.slab_thickness_mm > 0:
+                mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
+        
+        info['BL'] = [f"{mode_str}: {self.current_index + 1} / {total}", f"Zoom: {self.canvas.zoom_factor:.1f}x"]
+        info['BR'] = [f"WL: {int(self.window_level)} WW: {int(self.window_width)}"]
+
+        markers = {}
+        if self.is_mpr_enabled:
+            if self.view_plane == 'Axial': markers = {'T': 'A', 'B': 'P', 'L': 'R', 'R': 'L'}
+            elif self.view_plane == 'Coronal': markers = {'T': 'S', 'B': 'I', 'L': 'R', 'R': 'L'}
+            elif self.view_plane == 'Sagittal': markers = {'T': 'S', 'B': 'I', 'L': 'A', 'R': 'P'}
+        elif ds and 'ImageOrientationPatient' in ds:
+            try:
+                iop = [float(x) for x in ds.ImageOrientationPatient]
+                row_vec = iop[0:3]
+                col_vec = iop[3:6]
+                markers['R'] = self._get_orientation_label(row_vec)
+                markers['L'] = self._get_orientation_label([-x for x in row_vec])
+                markers['B'] = self._get_orientation_label(col_vec)
+                markers['T'] = self._get_orientation_label([-x for x in col_vec])
+            except: pass
+        info['Markers'] = markers
+        return info
+
+    def _get_orientation_label(self, vector):
+        if not vector or len(vector) != 3: return ""
+        abs_vec = [abs(v) for v in vector]
+        dominant_axis = abs_vec.index(max(abs_vec))
+        val = vector[dominant_axis]
+        if dominant_axis == 0: return "L" if val > 0 else "R"
+        if dominant_axis == 1: return "P" if val > 0 else "A"
+        if dominant_axis == 2: return "S" if val > 0 else "I"
+        return ""
 
     def toggle_mpr(self, enabled):
         if self.is_mpr_enabled == enabled: return
@@ -359,6 +404,7 @@ class ZetaViewport(QFrame):
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
         buttons = event.buttons()
         if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton):
+            self.is_right_dragged = True
             zoom_delta = -delta_y * 0.01; self.apply_zoom(zoom_delta); self.zoomed.emit(self, zoom_delta)
         elif self.current_tool_mode in [1, 2] and (buttons & Qt.MouseButton.LeftButton):
              if self.canvas.current_drawing_start:
