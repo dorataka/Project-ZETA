@@ -30,7 +30,7 @@ class ZetaViewport(QFrame):
         self.current_slices = []
         self.current_file_paths = []
         self.volume_data = None
-        self.voxel_spacing = (1.0, 1.0, 1.0) # z, y, x
+        self.voxel_spacing = (1.0, 1.0, 1.0)
         self.mpr_loaded = False
         
         self.current_index = 0
@@ -38,7 +38,6 @@ class ZetaViewport(QFrame):
         self.is_mpr_enabled = False 
         
         self.mip_mode = 'AVG'
-        # ★変更: mm単位で保持
         self.slab_thickness_mm = 0.0 
         
         self.window_level = 40
@@ -65,7 +64,79 @@ class ZetaViewport(QFrame):
         if active: self.setStyleSheet("border: 2px solid #00FF00;") 
         else: self.setStyleSheet("border: 1px solid #333333;")
 
-    # --- ★変更: mm単位で設定を受け取る ---
+    # --- 方向ラベル取得 ---
+    def _get_orientation_label(self, vector):
+        if not vector or len(vector) != 3: return ""
+        abs_vec = [abs(v) for v in vector]
+        dominant_axis = abs_vec.index(max(abs_vec))
+        val = vector[dominant_axis]
+        
+        # DICOM座標 (LPS)
+        if dominant_axis == 0: return "L" if val > 0 else "R"
+        if dominant_axis == 1: return "P" if val > 0 else "A"
+        if dominant_axis == 2: return "S" if val > 0 else "I"
+        return ""
+
+    # --- オーバーレイ情報作成 (デバッグ付き) ---
+    def create_overlay_info(self, ds):
+        info = {}
+        
+        # 基本情報
+        name = ""; pid = ""; date = ""; inst = ""; desc = ""
+        if ds:
+            def get_tag(tag, default=""): return str(ds.get(tag, default))
+            name = str(ds.get('PatientName', ''))
+            pid = str(ds.get('PatientID', ''))
+            sex = str(ds.get('PatientSex', ''))
+            age = str(ds.get('PatientAge', ''))
+            date = get_tag('StudyDate')
+            inst = get_tag('InstitutionName')
+            desc = get_tag('SeriesDescription')
+            info['TL'] = [name, pid, f"{sex} {age}"]
+            info['TR'] = [inst, date, desc]
+        
+        # スライス情報
+        total = self.get_max_index() + 1
+        mode_str = "Axial (2D)"
+        if self.is_mpr_enabled:
+            mode_str = f"{self.view_plane}"
+            if self.slab_thickness_mm > 0:
+                mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
+        
+        info['BL'] = [f"{mode_str}: {self.current_index + 1} / {total}", f"Zoom: {self.canvas.zoom_factor:.1f}x"]
+        info['BR'] = [f"WL: {int(self.window_level)} WW: {int(self.window_width)}"]
+
+        # --- マーカー計算 ---
+        markers = {}
+        
+        if self.is_mpr_enabled:
+            # MPRモード (固定)
+            if self.view_plane == 'Axial': markers = {'T': 'A', 'B': 'P', 'L': 'R', 'R': 'L'}
+            elif self.view_plane == 'Coronal': markers = {'T': 'S', 'B': 'I', 'L': 'R', 'R': 'L'}
+            elif self.view_plane == 'Sagittal': markers = {'T': 'S', 'B': 'I', 'L': 'A', 'R': 'P'}
+        
+        elif ds and 'ImageOrientationPatient' in ds:
+            # 2Dモード (タグから計算)
+            try:
+                iop = [float(x) for x in ds.ImageOrientationPatient]
+                row_vec = iop[0:3]
+                col_vec = iop[3:6]
+                markers['R'] = self._get_orientation_label(row_vec)
+                markers['L'] = self._get_orientation_label([-x for x in row_vec])
+                markers['B'] = self._get_orientation_label(col_vec)
+                markers['T'] = self._get_orientation_label([-x for x in col_vec])
+                # print(f"[DEBUG] 2D Markers: {markers}")
+            except Exception as e:
+                print(f"[DEBUG] Marker Calc Failed: {e}")
+        else:
+            # タグがない場合
+            # print("[DEBUG] No Orientation Tag Found")
+            pass
+            
+        info['Markers'] = markers
+        return info
+
+    # --- 以下、既存メソッド ---
     def set_mip_params(self, mode, thickness_mm):
         if not self.is_mpr_enabled: return
         self.mip_mode = mode
@@ -76,31 +147,22 @@ class ZetaViewport(QFrame):
         max_idx = self.get_max_index()
         self.current_index = max(0, min(self.current_index, max_idx))
         try:
-            slice_img = None
-            aspect_ratio = 1.0
-            sp_z, sp_y, sp_x = self.voxel_spacing
+            slice_img = None; aspect_ratio = 1.0; sp_z, sp_y, sp_x = self.voxel_spacing
             
-            # --- ★重要: mmから枚数への換算 ---
-            # 視線方向(Depth)のスペーシングを取得
             depth_spacing = 1.0
             if self.view_plane == 'Axial': depth_spacing = sp_z
             elif self.view_plane == 'Coronal': depth_spacing = sp_y
             elif self.view_plane == 'Sagittal': depth_spacing = sp_x
             
-            # 必要な枚数 (片側)
-            if depth_spacing > 0:
-                half_slices = int((self.slab_thickness_mm / depth_spacing) / 2)
-            else:
-                half_slices = 0
+            if depth_spacing > 0: half_slices = int((self.slab_thickness_mm / depth_spacing) / 2)
+            else: half_slices = 0
             
-            # --- スラブ切り出し ---
             if self.view_plane == 'Axial':
                 start = max(0, self.current_index - half_slices)
                 end = min(self.volume_data.shape[0], self.current_index + half_slices + 1)
                 slab = self.volume_data[start:end, :, :]
                 slice_img = self._project_slab(slab, axis=0)
                 aspect_ratio = 1.0
-
             elif self.view_plane == 'Coronal':
                 start = max(0, self.current_index - half_slices)
                 end = min(self.volume_data.shape[1], self.current_index + half_slices + 1)
@@ -108,7 +170,6 @@ class ZetaViewport(QFrame):
                 proj = self._project_slab(slab, axis=1)
                 slice_img = np.flipud(proj)
                 if sp_x > 0: aspect_ratio = sp_z / sp_x
-
             elif self.view_plane == 'Sagittal':
                 start = max(0, self.current_index - half_slices)
                 end = min(self.volume_data.shape[2], self.current_index + half_slices + 1)
@@ -120,9 +181,7 @@ class ZetaViewport(QFrame):
             ds = self.current_slices[0] if self.current_slices else None
             hu_image = slice_img.astype(np.float32)
             self._process_and_send_image(hu_image, aspect_ratio, ds)
-            
-        except Exception as e:
-            print(f"MPR Error: {e}")
+        except Exception as e: print(f"MPR Error: {e}")
 
     def _project_slab(self, slab, axis):
         if slab.shape[axis] == 0: return np.zeros((1,1), dtype=np.float32)
@@ -130,31 +189,10 @@ class ZetaViewport(QFrame):
             if axis == 0: return slab[0, :, :]
             if axis == 1: return slab[:, 0, :]
             if axis == 2: return slab[:, :, 0]
-
         if self.mip_mode == 'MIP': return np.max(slab, axis=axis)
         elif self.mip_mode == 'MinIP': return np.min(slab, axis=axis)
         else: return np.mean(slab, axis=axis)
 
-    def create_overlay_info(self, ds):
-        if not ds: return {}
-        def get_tag(tag, default=""): return str(ds.get(tag, default))
-        total = self.get_max_index() + 1
-        
-        mode_str = "Axial (2D)"
-        if self.is_mpr_enabled:
-            mode_str = f"{self.view_plane}"
-            if self.slab_thickness_mm > 0:
-                mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
-        
-        info = {
-            'TL': [str(ds.get('PatientName', '')), str(ds.get('PatientID', '')), f"{ds.get('PatientSex','')} {ds.get('PatientAge','')}"],
-            'TR': [get_tag('InstitutionName'), get_tag('StudyDate'), get_tag('SeriesDescription')],
-            'BL': [f"{mode_str}: {self.current_index + 1} / {total}", f"Zoom: {self.canvas.zoom_factor:.1f}x"],
-            'BR': [f"WL: {int(self.window_level)} WW: {int(self.window_width)}"]
-        }
-        return info
-
-    # --- 以下、既存メソッド ---
     def toggle_mpr(self, enabled):
         if self.is_mpr_enabled == enabled: return
         self.is_mpr_enabled = enabled

@@ -23,7 +23,6 @@ class ImageCanvas(QWidget):
         self.pan_x = 0
         self.pan_y = 0
         
-        # ズーム倍率 (1.0 = ウィンドウフィット)
         self.zoom_factor = 1.0
         
         self.measurements = []
@@ -37,7 +36,7 @@ class ImageCanvas(QWidget):
         self.pixel_spacing = None
         self.current_slice_index = 0
         
-        self.overlay_data = {'TL': [], 'TR': [], 'BL': [], 'BR': []}
+        self.overlay_data = {'TL': [], 'TR': [], 'BL': [], 'BR': [], 'Markers': {}}
         self.target_aspect_ratio = 1.0
 
         self.setStyleSheet("background-color: #000000;")
@@ -65,11 +64,9 @@ class ImageCanvas(QWidget):
         self.target_aspect_ratio = 1.0
         self.update()
 
-    # --- 座標変換ロジック (安全装置付き) ---
     def get_scale_and_offset(self):
         if self.pixmap is None: return 1.0, 0, 0
         
-        # 異常値のリセット (NaN/Inf対策)
         if math.isnan(self.zoom_factor) or math.isinf(self.zoom_factor) or self.zoom_factor <= 0.001:
             self.zoom_factor = 1.0
         if math.isnan(self.pan_x) or math.isinf(self.pan_x): self.pan_x = 0
@@ -79,7 +76,7 @@ class ImageCanvas(QWidget):
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
         
         display_h = img_h * self.target_aspect_ratio
-        if display_h == 0: display_h = 1 # 0除算防止
+        if display_h == 0: display_h = 1
         
         base_scale = min(win_w / img_w, win_h / display_h)
         final_scale = base_scale * self.zoom_factor
@@ -96,23 +93,18 @@ class ImageCanvas(QWidget):
         if self.pixmap is None: return None
         scale, off_x, off_y = self.get_scale_and_offset()
         if scale <= 0: return None
-        
         img_x = (screen_pos.x() - off_x) / scale
         img_y = (screen_pos.y() - off_y) / scale
         img_y = img_y / self.target_aspect_ratio
-        
         return QPointF(img_x, img_y)
 
     def image_to_screen(self, img_point):
         if self.pixmap is None: return QPointF(0,0)
         scale, off_x, off_y = self.get_scale_and_offset()
-        
         scr_x = img_point.x() * scale + off_x
         scr_y = (img_point.y() * self.target_aspect_ratio) * scale + off_y
-        
         return QPointF(scr_x, scr_y)
 
-    # --- 描画 ---
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
@@ -123,17 +115,13 @@ class ImageCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "[ NO SIGNAL ]")
             return
 
-        if self.pixmap.isNull():
-            return # 何も描画しない
+        if self.pixmap.isNull(): return
 
         scale, off_x, off_y = self.get_scale_and_offset()
-        
-        # 極小サイズなら描画スキップ (負荷軽減)
         if scale <= 0.001: return
 
         img_w = self.pixmap.width()
         img_h = self.pixmap.height()
-        
         draw_w = img_w * scale
         draw_h = (img_h * self.target_aspect_ratio) * scale
         target_rect = QRectF(off_x, off_y, draw_w, draw_h)
@@ -141,10 +129,8 @@ class ImageCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(target_rect.toRect(), self.pixmap)
 
-        # オーバーレイ
         self.draw_overlays(painter)
 
-        # 計測描画
         painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         for i, m in enumerate(self.measurements):
             if m.get('slice_index', -1) != self.current_slice_index: continue
@@ -164,7 +150,6 @@ class ImageCanvas(QWidget):
             rect_scr = QRectF(top_left, bottom_right)
             self.draw_roi(painter, rect_scr, roi['text'], color)
 
-        # ドラッグ中の描画
         if self.current_drawing_start and self.current_drawing_end:
             p1 = self.image_to_screen(self.current_drawing_start)
             p2 = self.image_to_screen(self.current_drawing_end)
@@ -172,12 +157,10 @@ class ImageCanvas(QWidget):
                 dx_img = self.current_drawing_end.x() - self.current_drawing_start.x()
                 dy_img = self.current_drawing_end.y() - self.current_drawing_start.y()
                 dist_px = math.sqrt(dx_img**2 + (dy_img * self.target_aspect_ratio)**2)
-                
                 if self.pixel_spacing:
                     dist_mm = dist_px * self.pixel_spacing[0] 
                     text = f"{dist_mm:.2f} mm"
-                else:
-                    text = f"{dist_px:.1f} px"
+                else: text = f"{dist_px:.1f} px"
                 self.draw_ruler(painter, p1, p2, text, QColor("#FFFF00"))
             elif self.current_mode == 'roi':
                 rect_img = QRectF(self.current_drawing_start, self.current_drawing_end).normalized()
@@ -186,8 +169,7 @@ class ImageCanvas(QWidget):
                 if stats != "N/A":
                     mean, std, mx, mn, area = stats
                     text = f"Mean:{mean:.1f} SD:{std:.1f}\nMax:{mx:.0f} Min:{mn:.0f}\nArea:{area:.0f}mm2"
-                else:
-                    text = "..."
+                else: text = "..."
                 self.draw_roi(painter, rect_scr, text, QColor("#00FFFF"))
 
     def draw_overlays(self, painter):
@@ -207,10 +189,34 @@ class ImageCanvas(QWidget):
                 painter.setPen(QColor("#000000")); painter.drawText(int(x)+1, int(y)+1, text)
                 painter.setPen(QColor("#FFFFFF")); painter.drawText(int(x), int(y), text)
                 
-        draw_lines(self.overlay_data['TL'], 'left', 'top')
-        draw_lines(self.overlay_data['TR'], 'right', 'top')
-        draw_lines(self.overlay_data['BL'], 'left', 'bottom')
-        draw_lines(self.overlay_data['BR'], 'right', 'bottom')
+        draw_lines(self.overlay_data.get('TL', []), 'left', 'top')
+        draw_lines(self.overlay_data.get('TR', []), 'right', 'top')
+        draw_lines(self.overlay_data.get('BL', []), 'left', 'bottom')
+        draw_lines(self.overlay_data.get('BR', []), 'right', 'bottom')
+
+        # マーカー描画
+        markers = self.overlay_data.get('Markers', {})
+        marker_font = QFont("Arial", 14, QFont.Weight.Bold)
+        painter.setFont(marker_font)
+        fm = QFontMetrics(marker_font)
+        
+        def draw_marker(text, x, y):
+            if not text: return
+            painter.setPen(QColor("#000000")); painter.drawText(int(x)+1, int(y)+1, text)
+            painter.setPen(QColor("#FFFF00")); painter.drawText(int(x), int(y), text)
+
+        if 'T' in markers:
+            t = markers['T']; w = fm.horizontalAdvance(t)
+            draw_marker(t, (win_w - w)/2, margin_y + 20)
+        if 'B' in markers:
+            t = markers['B']; w = fm.horizontalAdvance(t)
+            draw_marker(t, (win_w - w)/2, win_h - margin_y)
+        if 'L' in markers:
+            t = markers['L']; w = fm.horizontalAdvance(t)
+            draw_marker(t, margin_x, win_h/2)
+        if 'R' in markers:
+            t = markers['R']; w = fm.horizontalAdvance(t)
+            draw_marker(t, win_w - margin_x - w, win_h/2)
 
     def draw_ruler(self, painter, p1, p2, text, color):
         pen = QPen(color); pen.setWidth(2); painter.setPen(pen)
