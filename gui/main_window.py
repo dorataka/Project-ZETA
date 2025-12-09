@@ -1,5 +1,5 @@
 import os
-import re 
+import re
 from PyQt6.QtWidgets import (QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, 
                              QPushButton, QMessageBox, QListWidget, QListWidgetItem, 
                              QButtonGroup, QGridLayout, QSpinBox, QFrame, QProgressBar,
@@ -9,6 +9,8 @@ from PyQt6.QtGui import QKeyEvent, QDrag
 
 from gui.viewport import ZetaViewport
 from core.loader import DicomScanWorker
+# ★追加: 新しいグリッドボタンをインポート
+from gui.grid_selector import GridSelectionButton
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -28,7 +30,7 @@ class DraggableListWidget(QListWidget):
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Project Z.E.T.A. - MIP/MinIP (mm Edition)")
+        self.setWindowTitle("Project Z.E.T.A. - Intuitive UI Edition")
         self.resize(1600, 900)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -49,19 +51,15 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # 1. Grid
+        # --- 1. Grid Layout (直感的UIに変更) ---
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
-        self.grid_ctrl_layout = QHBoxLayout()
-        self.spin_rows = QSpinBox(); self.spin_rows.setRange(1, 5); self.spin_rows.setValue(1)
-        self.spin_cols = QSpinBox(); self.spin_cols.setRange(1, 5); self.spin_cols.setValue(1)
-        self.spin_rows.setPrefix("R:"); self.spin_cols.setPrefix("C:")
-        self.btn_apply_grid = QPushButton("APPLY")
-        self.btn_apply_grid.clicked.connect(self.on_apply_grid_clicked)
-        self.grid_ctrl_layout.addWidget(self.spin_rows)
-        self.grid_ctrl_layout.addWidget(self.spin_cols)
-        self.grid_ctrl_layout.addWidget(self.btn_apply_grid)
-        self.left_layout.addLayout(self.grid_ctrl_layout)
+        
+        # 以前のSpinBoxを削除し、新しいボタンを配置
+        self.btn_grid_picker = GridSelectionButton("GRID: 1x1")
+        self.btn_grid_picker.grid_changed.connect(self.update_grid_layout)
+        self.left_layout.addWidget(self.btn_grid_picker)
+        
         self.left_layout.addSpacing(20)
 
         # 2. MPR & MIP Controls
@@ -87,19 +85,16 @@ class ZetaViewer(QMainWindow):
 
         # MIP/MinIP 設定
         self.mip_layout = QHBoxLayout()
-        
         self.combo_mip_mode = QComboBox()
         self.combo_mip_mode.addItems(["AVG", "MIP", "MinIP"])
         self.combo_mip_mode.currentIndexChanged.connect(self.update_mip_settings)
         
-        # 厚み指定 (ComboBox + Editable)
         self.combo_thickness = QComboBox()
         self.combo_thickness.setEditable(True) 
-        presets = [f"{i} mm" for i in range(8)] # 0 mm ... 7 mm
+        presets = [f"{i} mm" for i in range(8)] 
         presets.extend(["10 mm", "15 mm", "20 mm", "50 mm"])
         self.combo_thickness.addItems(presets)
         self.combo_thickness.setCurrentText("0 mm") 
-        
         self.combo_thickness.editTextChanged.connect(self.update_mip_settings)
         self.combo_thickness.currentIndexChanged.connect(self.update_mip_settings)
         
@@ -149,38 +144,31 @@ class ZetaViewer(QMainWindow):
         self.grid_layout.setSpacing(2) 
         self.main_layout.addWidget(self.right_panel, 1)
 
-    # --- ★変更: コンボボックスを見やすくしたスタイル ---
     def apply_styles(self):
         self.setStyleSheet("""
             QMainWindow { background-color: #050505; }
             QLabel { color: #00FF00; font-family: 'Consolas'; font-weight: bold; } 
             
-            /* リストと共通パーツ */
             QListWidget {
                 background-color: #111; border: 1px solid #005500; color: #00DD00; font-family: 'Consolas';
             }
             QListWidget::item:selected { background-color: #004400; color: #FFFFFF; }
             
-            /* ボタン */
             QPushButton { 
                 background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 8px; font-family: 'Consolas'; font-weight: bold;
             }
             QPushButton:hover { background-color: #003300; }
             QPushButton:checked { background-color: #FFFF00; color: #000000; border: 1px solid #FFFF00; }
+            QPushButton::menu-indicator { image: none; } /* メニュー矢印を消してスッキリさせる */
+            
             QPushButton:disabled { background-color: #111; color: #555; border: 1px solid #333; }
             
-            /* 入力系 (スピンボックス・コンボボックス) */
-            QSpinBox {
-                background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 5px; font-family: 'Consolas';
-            }
-            
-            /* ★コンボボックスの視認性向上 */
             QComboBox {
                 background-color: #1a1a1a;
                 color: #00FF00;
                 border: 1px solid #005500;
                 padding: 5px;
-                padding-right: 20px; /* 矢印スペース確保 */
+                padding-right: 20px;
                 font-family: 'Consolas';
             }
             QComboBox::drop-down {
@@ -190,29 +178,23 @@ class ZetaViewer(QMainWindow):
                 border-left-width: 1px;
                 border-left-color: #005500;
                 border-left-style: solid;
-                background-color: #222; /* ボタン背景を少し明るく */
+                background-color: #222;
             }
-            /* 下向き矢印をCSSで描画 */
             QComboBox::down-arrow {
-                width: 0; 
-                height: 0; 
+                width: 0; height: 0; 
                 border-left: 5px solid transparent;
                 border-right: 5px solid transparent;
-                border-top: 6px solid #00FF00; /* 緑の三角形 */
+                border-top: 6px solid #00FF00;
                 margin-right: 5px;
             }
-            /* ドロップダウンリストの中身 */
             QComboBox QAbstractItemView {
                 background-color: #111;
                 color: #00FF00;
                 border: 1px solid #005500;
                 selection-background-color: #004400;
             }
-            /* 直接入力エリアのスタイル */
             QComboBox QLineEdit {
-                color: #00FF00; 
-                background-color: #1a1a1a;
-                border: none;
+                color: #00FF00; background-color: #1a1a1a; border: none;
             }
         """)
 
@@ -256,9 +238,9 @@ class ZetaViewer(QMainWindow):
         if not self.btn_mpr_enable.isChecked(): return
         for vp in self.selected_viewports: vp.set_view_plane(plane)
 
-    def on_apply_grid_clicked(self):
-        rows = self.spin_rows.value(); cols = self.spin_cols.value()
-        self.update_grid_layout(rows, cols)
+    # --- グリッド更新 (引数なし版も削除) ---
+    # `btn_grid_picker` は (rows, cols) をemitするので、それを受け取る
+    
     def update_grid_layout(self, rows, cols):
         for i in reversed(range(self.grid_layout.count())): 
             widget = self.grid_layout.itemAt(i).widget()
@@ -281,6 +263,9 @@ class ZetaViewer(QMainWindow):
                 self.viewports.append(vp)
         if self.viewports: self.select_single_viewport(self.viewports[0])
     
+    def on_apply_grid_clicked(self): # もう使わないが互換性のため残すか削除
+        pass 
+
     def on_process_start(self, message):
         self.progress_bar.setVisible(True); self.progress_bar.setValue(0); self.mpr_label.setText(f"BUSY: {message}")
     def on_process_progress(self, val): self.progress_bar.setValue(val)
