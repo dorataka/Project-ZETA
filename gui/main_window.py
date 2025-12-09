@@ -29,7 +29,7 @@ class DraggableListWidget(QListWidget):
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Project Z.E.T.A. - Intuitive UI Edition")
+        self.setWindowTitle("Project Z.E.T.A. - Cross Reference Ready")
         self.resize(1600, 900)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -50,7 +50,7 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # 1. Grid
+        # Grid
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
         self.btn_grid_picker = GridSelectionButton("GRID: 1x1")
@@ -58,7 +58,7 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_grid_picker)
         self.left_layout.addSpacing(20)
 
-        # 2. MPR & MIP Controls
+        # MPR
         self.mpr_label = QLabel("3D RECONSTRUCTION")
         self.left_layout.addWidget(self.mpr_label)
         self.btn_mpr_enable = QPushButton("ENABLE MPR MODE")
@@ -94,14 +94,14 @@ class ZetaViewer(QMainWindow):
         self.update_mpr_buttons_state(False)
         self.left_layout.addSpacing(20)
 
-        # Progress Bar
+        # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100); self.progress_bar.setValue(0); self.progress_bar.setVisible(False)
         self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #555; border-radius: 3px; text-align: center; color: white; } QProgressBar::chunk { background-color: #00FF00; }")
         self.left_layout.addWidget(self.progress_bar)
         self.left_layout.addSpacing(10)
 
-        # 3. Tools
+        # Tools
         self.mode_label = QLabel("CONTROLLER MODE")
         self.left_layout.addWidget(self.mode_label)
         self.btn_nav = QPushButton("NAVIGATE"); self.btn_nav.setCheckable(True); self.btn_nav.setChecked(True)
@@ -115,7 +115,7 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_nav); self.left_layout.addWidget(self.btn_ruler); self.left_layout.addWidget(self.btn_roi)
         self.left_layout.addSpacing(20)
         
-        # 4. Series List
+        # List
         self.series_label = QLabel("SERIES LIST")
         self.left_layout.addWidget(self.series_label)
         self.series_list_widget = DraggableListWidget()
@@ -151,26 +151,17 @@ class ZetaViewer(QMainWindow):
             QComboBox QLineEdit { color: #00FF00; background-color: #1a1a1a; border: none; }
         """)
 
-    # --- ★修正: グリッド更新時に状態を維持する ---
     def update_grid_layout(self, rows, cols):
-        # 1. 現在の各ビューポートの状態をバックアップ
         existing_states = []
-        for vp in self.viewports:
-            existing_states.append(vp.get_state())
-
-        # 2. 既存ウィジェットの削除
+        for vp in self.viewports: existing_states.append(vp.get_state())
         for i in reversed(range(self.grid_layout.count())): 
             widget = self.grid_layout.itemAt(i).widget()
             if widget: widget.setParent(None); widget.deleteLater()
-        
         self.viewports = []
         self.selected_viewports = set()
-
-        # 3. 新しいグリッド作成
         for r in range(rows):
             for c in range(cols):
                 vp = ZetaViewport()
-                # シグナル接続
                 vp.activated.connect(self.on_viewport_activated)
                 vp.series_dropped.connect(self.on_viewport_series_dropped)
                 vp.scrolled.connect(self.on_viewport_scrolled)
@@ -180,21 +171,25 @@ class ZetaViewer(QMainWindow):
                 vp.processing_start.connect(self.on_process_start)
                 vp.processing_progress.connect(self.on_process_progress)
                 vp.processing_finish.connect(self.on_process_finish)
+                # ★追加: 位置情報の連携
+                vp.cross_ref_pos_changed.connect(self.on_viewport_pos_changed)
                 
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
-        
-        # 4. 状態の復元 (順番通りに流し込む)
         for i, vp in enumerate(self.viewports):
-            if i < len(existing_states):
-                vp.restore_state(existing_states[i])
-
-        # 5. 選択状態の初期化
+            if i < len(existing_states): vp.restore_state(existing_states[i])
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
-    def on_apply_grid_clicked(self): pass # 互換性のため残存
+    # --- ★追加: 位置同期 ---
+    def on_viewport_pos_changed(self, sender, cx, cy, cz):
+        # 自分が選択中(アクティブ)なら、全ビューポートに位置を送る
+        # これにより、非アクティブなビューポートも連動して線が動く
+        if sender in self.selected_viewports:
+            for vp in self.viewports:
+                vp.set_cross_ref_lines(sender, cx, cy, cz)
 
-    # ... (以下のメソッドは変更なし) ...
+    # ... (他は変更なし) ...
+    def on_apply_grid_clicked(self): pass
     def update_mip_settings(self):
         mode_idx = self.combo_mip_mode.currentIndex()
         mode_str = 'AVG'

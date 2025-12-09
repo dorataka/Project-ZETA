@@ -27,6 +27,10 @@ class ImageCanvas(QWidget):
         
         self.measurements = []
         self.rois = []
+        # ★追加: クロスリファレンス線 (リスト)
+        # 形式: {'type': 'V' or 'H', 'pos': image_coordinate, 'color': QColor}
+        self.cross_ref_lines = []
+        
         self.selected_type = None
         self.selected_index = None
         self.current_drawing_start = None 
@@ -57,6 +61,7 @@ class ImageCanvas(QWidget):
         self.zoom_factor = 1.0
         self.measurements = []
         self.rois = []
+        self.cross_ref_lines = [] # リセット
         self.selected_index = None
         self.selected_type = None
         self.current_drawing_start = None
@@ -129,6 +134,9 @@ class ImageCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(target_rect.toRect(), self.pixmap)
 
+        # ★追加: クロスリファレンス線の描画
+        self.draw_cross_refs(painter)
+
         self.draw_overlays(painter)
 
         painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -172,6 +180,45 @@ class ImageCanvas(QWidget):
                 else: text = "..."
                 self.draw_roi(painter, rect_scr, text, QColor("#00FFFF"))
 
+    # --- ★追加: 線描画の実装 ---
+    def draw_cross_refs(self, painter):
+        if not self.cross_ref_lines: return
+        
+        # 画面外にはみ出さないようにクリップ
+        painter.setClipRect(self.rect())
+        
+        for line in self.cross_ref_lines:
+            color = line.get('color', QColor("#FFFF00")) # デフォルト黄色
+            pos_img = line['pos'] # 画像座標 (0~img_w, 0~img_h)
+            
+            pen = QPen(color)
+            pen.setWidth(1)
+            pen.setStyle(Qt.PenStyle.DashLine) # 点線
+            painter.setPen(pen)
+            
+            # 画像座標 -> スクリーン座標
+            # ただし線なので、片方の軸だけ変換すれば良い
+            
+            # 垂直線 (Vertical) -> X座標を指定して縦に引く
+            if line['type'] == 'V':
+                # 始点(pos_img, 0) -> 終点(pos_img, img_h)
+                p_top = self.image_to_screen(QPointF(pos_img, 0))
+                p_bottom = self.image_to_screen(QPointF(pos_img, self.pixmap.height()))
+                
+                # 画面の上下端まで伸ばすために描画範囲を拡張
+                painter.drawLine(int(p_top.x()), 0, int(p_bottom.x()), self.height())
+
+            # 水平線 (Horizontal) -> Y座標を指定して横に引く
+            elif line['type'] == 'H':
+                # 始点(0, pos_img) -> 終点(img_w, pos_img)
+                p_left = self.image_to_screen(QPointF(0, pos_img))
+                p_right = self.image_to_screen(QPointF(self.pixmap.width(), pos_img))
+                
+                painter.drawLine(0, int(p_left.y()), self.width(), int(p_right.y()))
+        
+        # クリップ解除
+        painter.setClipping(False)
+
     def draw_overlays(self, painter):
         font = QFont("Consolas", 11, QFont.Weight.Bold)
         painter.setFont(font)
@@ -194,7 +241,6 @@ class ImageCanvas(QWidget):
         draw_lines(self.overlay_data.get('BL', []), 'left', 'bottom')
         draw_lines(self.overlay_data.get('BR', []), 'right', 'bottom')
 
-        # マーカー描画
         markers = self.overlay_data.get('Markers', {})
         marker_font = QFont("Arial", 14, QFont.Weight.Bold)
         painter.setFont(marker_font)
