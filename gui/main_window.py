@@ -29,7 +29,7 @@ class DraggableListWidget(QListWidget):
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Project Z.E.T.A. - Cross Reference Ready")
+        self.setWindowTitle("Project Z.E.T.A. - Pixel Probe Edition")
         self.resize(1600, 900)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -41,6 +41,7 @@ class ZetaViewer(QMainWindow):
         self.apply_styles()
         self.update_grid_layout(1, 1)
 
+    # --- UI Setup (変更なし) ---
     def setup_ui(self):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -50,7 +51,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
-        # Grid
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
         self.btn_grid_picker = GridSelectionButton("GRID: 1x1")
@@ -58,7 +58,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_grid_picker)
         self.left_layout.addSpacing(20)
 
-        # MPR
         self.mpr_label = QLabel("3D RECONSTRUCTION")
         self.left_layout.addWidget(self.mpr_label)
         self.btn_mpr_enable = QPushButton("ENABLE MPR MODE")
@@ -94,14 +93,12 @@ class ZetaViewer(QMainWindow):
         self.update_mpr_buttons_state(False)
         self.left_layout.addSpacing(20)
 
-        # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100); self.progress_bar.setValue(0); self.progress_bar.setVisible(False)
         self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #555; border-radius: 3px; text-align: center; color: white; } QProgressBar::chunk { background-color: #00FF00; }")
         self.left_layout.addWidget(self.progress_bar)
         self.left_layout.addSpacing(10)
 
-        # Tools
         self.mode_label = QLabel("CONTROLLER MODE")
         self.left_layout.addWidget(self.mode_label)
         self.btn_nav = QPushButton("NAVIGATE"); self.btn_nav.setCheckable(True); self.btn_nav.setChecked(True)
@@ -115,7 +112,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_nav); self.left_layout.addWidget(self.btn_ruler); self.left_layout.addWidget(self.btn_roi)
         self.left_layout.addSpacing(20)
         
-        # List
         self.series_label = QLabel("SERIES LIST")
         self.left_layout.addWidget(self.series_label)
         self.series_list_widget = DraggableListWidget()
@@ -126,7 +122,6 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.open_btn)
         self.main_layout.addWidget(self.left_panel)
 
-        # Right Panel
         self.right_panel = QWidget()
         self.grid_layout = QGridLayout(self.right_panel)
         self.grid_layout.setContentsMargins(0,0,0,0)
@@ -151,6 +146,28 @@ class ZetaViewer(QMainWindow):
             QComboBox QLineEdit { color: #00FF00; background-color: #1a1a1a; border: none; }
         """)
 
+    # --- ★追加: キーイベント処理 (プローブ & 削除) ---
+    def keyPressEvent(self, event: QKeyEvent):
+        # 削除機能
+        if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+            for vp in self.selected_viewports: vp.delete_measurement()
+        
+        # ★追加: ZキーでプローブON
+        elif event.key() == Qt.Key.Key_Z:
+            for vp in self.viewports:
+                vp.set_probe_mode(True)
+        
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        # ★追加: Zキー解放でプローブOFF
+        if event.key() == Qt.Key.Key_Z:
+            for vp in self.viewports:
+                vp.set_probe_mode(False)
+        
+        super().keyReleaseEvent(event)
+
+    # ... (他は変更なし) ...
     def update_grid_layout(self, rows, cols):
         existing_states = []
         for vp in self.viewports: existing_states.append(vp.get_state())
@@ -171,24 +188,17 @@ class ZetaViewer(QMainWindow):
                 vp.processing_start.connect(self.on_process_start)
                 vp.processing_progress.connect(self.on_process_progress)
                 vp.processing_finish.connect(self.on_process_finish)
-                # ★追加: 位置情報の連携
                 vp.cross_ref_pos_changed.connect(self.on_viewport_pos_changed)
-                
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
         for i, vp in enumerate(self.viewports):
             if i < len(existing_states): vp.restore_state(existing_states[i])
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
-    # --- ★追加: 位置同期 ---
     def on_viewport_pos_changed(self, sender, cx, cy, cz):
-        # 自分が選択中(アクティブ)なら、全ビューポートに位置を送る
-        # これにより、非アクティブなビューポートも連動して線が動く
         if sender in self.selected_viewports:
-            for vp in self.viewports:
-                vp.set_cross_ref_lines(sender, cx, cy, cz)
+            for vp in self.viewports: vp.set_cross_ref_lines(sender, cx, cy, cz)
 
-    # ... (他は変更なし) ...
     def on_apply_grid_clicked(self): pass
     def update_mip_settings(self):
         mode_idx = self.combo_mip_mode.currentIndex()
@@ -297,10 +307,6 @@ class ZetaViewer(QMainWindow):
             path = urls[0].toLocalFile()
             if os.path.isdir(path): self.start_folder_scan(path)
             elif os.path.isfile(path): self.start_folder_scan(os.path.dirname(path))
-    def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
-            for vp in self.selected_viewports: vp.delete_measurement()
-        super().keyPressEvent(event)
     def open_folder_dialog(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Select DICOM Folder")
         if folder_path: self.start_folder_scan(folder_path)

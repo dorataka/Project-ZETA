@@ -22,13 +22,10 @@ class ImageCanvas(QWidget):
         self.hu_grid = None 
         self.pan_x = 0
         self.pan_y = 0
-        
         self.zoom_factor = 1.0
         
         self.measurements = []
         self.rois = []
-        # ★追加: クロスリファレンス線 (リスト)
-        # 形式: {'type': 'V' or 'H', 'pos': image_coordinate, 'color': QColor}
         self.cross_ref_lines = []
         
         self.selected_type = None
@@ -37,6 +34,9 @@ class ImageCanvas(QWidget):
         self.current_drawing_end = None
         self.current_mode = None 
 
+        self.is_probe_active = False
+        self.probe_pos = None
+
         self.pixel_spacing = None
         self.current_slice_index = 0
         
@@ -44,7 +44,12 @@ class ImageCanvas(QWidget):
         self.target_aspect_ratio = 1.0
 
         self.setStyleSheet("background-color: #000000;")
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) 
+        
+        # ★修正: ここを False -> True に変更しないと、クリックなしの移動を検知できません
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False) 
+        
+        # ★追加: マウス追跡を有効化 (これでクリックなしでも moveEvent が発生する)
+        self.setMouseTracking(True)
 
     def set_pixmap(self, pixmap, pixel_spacing=None, slice_index=0, hu_grid=None, overlay_data=None, aspect_ratio=1.0):
         self.pixmap = pixmap
@@ -61,7 +66,7 @@ class ImageCanvas(QWidget):
         self.zoom_factor = 1.0
         self.measurements = []
         self.rois = []
-        self.cross_ref_lines = [] # リセット
+        self.cross_ref_lines = []
         self.selected_index = None
         self.selected_type = None
         self.current_drawing_start = None
@@ -69,17 +74,24 @@ class ImageCanvas(QWidget):
         self.target_aspect_ratio = 1.0
         self.update()
 
+    def set_probe_active(self, active, pos=None):
+        self.is_probe_active = active
+        if pos: self.probe_pos = pos
+        self.update()
+
+    def update_probe_pos(self, pos):
+        if self.is_probe_active:
+            self.probe_pos = pos
+            self.update()
+
     def get_scale_and_offset(self):
         if self.pixmap is None: return 1.0, 0, 0
-        
-        if math.isnan(self.zoom_factor) or math.isinf(self.zoom_factor) or self.zoom_factor <= 0.001:
-            self.zoom_factor = 1.0
+        if math.isnan(self.zoom_factor) or math.isinf(self.zoom_factor) or self.zoom_factor <= 0.001: self.zoom_factor = 1.0
         if math.isnan(self.pan_x) or math.isinf(self.pan_x): self.pan_x = 0
         if math.isnan(self.pan_y) or math.isinf(self.pan_y): self.pan_y = 0
         
         win_w, win_h = self.width(), self.height()
         img_w, img_h = self.pixmap.width(), self.pixmap.height()
-        
         display_h = img_h * self.target_aspect_ratio
         if display_h == 0: display_h = 1
         
@@ -88,10 +100,8 @@ class ImageCanvas(QWidget):
         
         draw_w = img_w * final_scale
         draw_h = display_h * final_scale
-        
         offset_x = (win_w - draw_w) / 2 + self.pan_x
         offset_y = (win_h - draw_h) / 2 + self.pan_y
-        
         return final_scale, offset_x, offset_y
 
     def screen_to_image(self, screen_pos):
@@ -134,9 +144,7 @@ class ImageCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(target_rect.toRect(), self.pixmap)
 
-        # ★追加: クロスリファレンス線の描画
         self.draw_cross_refs(painter)
-
         self.draw_overlays(painter)
 
         painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -165,9 +173,7 @@ class ImageCanvas(QWidget):
                 dx_img = self.current_drawing_end.x() - self.current_drawing_start.x()
                 dy_img = self.current_drawing_end.y() - self.current_drawing_start.y()
                 dist_px = math.sqrt(dx_img**2 + (dy_img * self.target_aspect_ratio)**2)
-                if self.pixel_spacing:
-                    dist_mm = dist_px * self.pixel_spacing[0] 
-                    text = f"{dist_mm:.2f} mm"
+                if self.pixel_spacing: dist_mm = dist_px * self.pixel_spacing[0]; text = f"{dist_mm:.2f} mm"
                 else: text = f"{dist_px:.1f} px"
                 self.draw_ruler(painter, p1, p2, text, QColor("#FFFF00"))
             elif self.current_mode == 'roi':
@@ -179,52 +185,57 @@ class ImageCanvas(QWidget):
                     text = f"Mean:{mean:.1f} SD:{std:.1f}\nMax:{mx:.0f} Min:{mn:.0f}\nArea:{area:.0f}mm2"
                 else: text = "..."
                 self.draw_roi(painter, rect_scr, text, QColor("#00FFFF"))
+        
+        self.draw_probe(painter)
 
-    # --- ★追加: 線描画の実装 ---
+    def draw_probe(self, painter):
+        if not self.is_probe_active or self.probe_pos is None: return
+        img_pt = self.screen_to_image(self.probe_pos)
+        if not img_pt: return
+        ix, iy = int(img_pt.x()), int(img_pt.y())
+        if self.hu_grid is not None:
+            h, w = self.hu_grid.shape
+            if 0 <= ix < w and 0 <= iy < h:
+                val = self.hu_grid[iy, ix]
+                text = f"HU: {int(val)}"
+                x = self.probe_pos.x() + 15
+                y = self.probe_pos.y() + 25
+                if x + 80 > self.width(): x -= 100
+                if y + 20 > self.height(): y -= 40
+                
+                font = QFont("Arial", 11, QFont.Weight.Bold)
+                painter.setFont(font)
+                fm = QFontMetrics(font)
+                text_rect = fm.boundingRect(text)
+                
+                bg_rect = QRectF(x - 4, y - text_rect.height(), text_rect.width() + 8, text_rect.height() + 4)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 180))
+                painter.drawRoundedRect(bg_rect, 4, 4)
+                
+                painter.setPen(QColor("#00FF00"))
+                painter.drawText(int(x), int(y), text)
+
     def draw_cross_refs(self, painter):
         if not self.cross_ref_lines: return
-        
-        # 画面外にはみ出さないようにクリップ
         painter.setClipRect(self.rect())
-        
         for line in self.cross_ref_lines:
-            color = line.get('color', QColor("#FFFF00")) # デフォルト黄色
-            pos_img = line['pos'] # 画像座標 (0~img_w, 0~img_h)
-            
-            pen = QPen(color)
-            pen.setWidth(1)
-            pen.setStyle(Qt.PenStyle.DashLine) # 点線
-            painter.setPen(pen)
-            
-            # 画像座標 -> スクリーン座標
-            # ただし線なので、片方の軸だけ変換すれば良い
-            
-            # 垂直線 (Vertical) -> X座標を指定して縦に引く
+            color = line.get('color', QColor("#FFFF00"))
+            pos_img = line['pos']
+            pen = QPen(color); pen.setWidth(1); pen.setStyle(Qt.PenStyle.DashLine); painter.setPen(pen)
             if line['type'] == 'V':
-                # 始点(pos_img, 0) -> 終点(pos_img, img_h)
                 p_top = self.image_to_screen(QPointF(pos_img, 0))
                 p_bottom = self.image_to_screen(QPointF(pos_img, self.pixmap.height()))
-                
-                # 画面の上下端まで伸ばすために描画範囲を拡張
                 painter.drawLine(int(p_top.x()), 0, int(p_bottom.x()), self.height())
-
-            # 水平線 (Horizontal) -> Y座標を指定して横に引く
             elif line['type'] == 'H':
-                # 始点(0, pos_img) -> 終点(img_w, pos_img)
                 p_left = self.image_to_screen(QPointF(0, pos_img))
                 p_right = self.image_to_screen(QPointF(self.pixmap.width(), pos_img))
-                
                 painter.drawLine(0, int(p_left.y()), self.width(), int(p_right.y()))
-        
-        # クリップ解除
         painter.setClipping(False)
 
     def draw_overlays(self, painter):
-        font = QFont("Consolas", 11, QFont.Weight.Bold)
-        painter.setFont(font)
-        margin_x = 10; margin_y = 10; line_height = 18
-        win_w = self.width(); win_h = self.height()
-        
+        font = QFont("Consolas", 11, QFont.Weight.Bold); painter.setFont(font)
+        margin_x = 10; margin_y = 10; line_height = 18; win_w = self.width(); win_h = self.height()
         def draw_lines(lines, align_x, align_y):
             for i, text in enumerate(lines):
                 if not text: continue
@@ -235,34 +246,20 @@ class ImageCanvas(QWidget):
                 else: y = win_h - margin_y - (len(lines) - 1 - i) * line_height
                 painter.setPen(QColor("#000000")); painter.drawText(int(x)+1, int(y)+1, text)
                 painter.setPen(QColor("#FFFFFF")); painter.drawText(int(x), int(y), text)
-                
         draw_lines(self.overlay_data.get('TL', []), 'left', 'top')
         draw_lines(self.overlay_data.get('TR', []), 'right', 'top')
         draw_lines(self.overlay_data.get('BL', []), 'left', 'bottom')
         draw_lines(self.overlay_data.get('BR', []), 'right', 'bottom')
-
         markers = self.overlay_data.get('Markers', {})
-        marker_font = QFont("Arial", 14, QFont.Weight.Bold)
-        painter.setFont(marker_font)
-        fm = QFontMetrics(marker_font)
-        
+        marker_font = QFont("Arial", 14, QFont.Weight.Bold); painter.setFont(marker_font); fm = QFontMetrics(marker_font)
         def draw_marker(text, x, y):
             if not text: return
             painter.setPen(QColor("#000000")); painter.drawText(int(x)+1, int(y)+1, text)
             painter.setPen(QColor("#FFFF00")); painter.drawText(int(x), int(y), text)
-
-        if 'T' in markers:
-            t = markers['T']; w = fm.horizontalAdvance(t)
-            draw_marker(t, (win_w - w)/2, margin_y + 20)
-        if 'B' in markers:
-            t = markers['B']; w = fm.horizontalAdvance(t)
-            draw_marker(t, (win_w - w)/2, win_h - margin_y)
-        if 'L' in markers:
-            t = markers['L']; w = fm.horizontalAdvance(t)
-            draw_marker(t, margin_x, win_h/2)
-        if 'R' in markers:
-            t = markers['R']; w = fm.horizontalAdvance(t)
-            draw_marker(t, win_w - margin_x - w, win_h/2)
+        if 'T' in markers: t = markers['T']; w = fm.horizontalAdvance(t); draw_marker(t, (win_w - w)/2, margin_y + 20)
+        if 'B' in markers: t = markers['B']; w = fm.horizontalAdvance(t); draw_marker(t, (win_w - w)/2, win_h - margin_y)
+        if 'L' in markers: t = markers['L']; w = fm.horizontalAdvance(t); draw_marker(t, margin_x, win_h/2)
+        if 'R' in markers: t = markers['R']; w = fm.horizontalAdvance(t); draw_marker(t, win_w - margin_x - w, win_h/2)
 
     def draw_ruler(self, painter, p1, p2, text, color):
         pen = QPen(color); pen.setWidth(2); painter.setPen(pen)
@@ -316,34 +313,28 @@ class ImageCanvas(QWidget):
         if self.selected_index is None: return False
         if self.selected_type == 'ruler':
             if 0 <= self.selected_index < len(self.measurements):
-                self.measurements.pop(self.selected_index)
-                self.selected_index = None; self.selected_type = None; self.update(); return True
+                self.measurements.pop(self.selected_index); self.selected_index = None; self.selected_type = None; self.update(); return True
         elif self.selected_type == 'roi':
             if 0 <= self.selected_index < len(self.rois):
-                self.rois.pop(self.selected_index)
-                self.selected_index = None; self.selected_type = None; self.update(); return True
+                self.rois.pop(self.selected_index); self.selected_index = None; self.selected_type = None; self.update(); return True
         return False
 
     def calculate_roi_stats(self, rect):
         if self.hu_grid is None: return "N/A"
         h, w = self.hu_grid.shape
         norm_rect = rect.normalized()
-        x = int(norm_rect.x()); y = int(norm_rect.y())
-        rw = int(norm_rect.width()); rh = int(norm_rect.height())
+        x = int(norm_rect.x()); y = int(norm_rect.y()); rw = int(norm_rect.width()); rh = int(norm_rect.height())
         if rw <= 0 or rh <= 0: return "N/A"
-        x_start = max(0, x); y_start = max(0, y)
-        x_end = min(w, x + rw + 1); y_end = min(h, y + rh + 1)
+        x_start = max(0, x); y_start = max(0, y); x_end = min(w, x + rw + 1); y_end = min(h, y + rh + 1)
         if x_start >= x_end or y_start >= y_end: return "N/A"
         sub_img = self.hu_grid[y_start:y_end, x_start:x_end]
-        cx = x + rw / 2.0; cy = y + rh / 2.0
-        rx = rw / 2.0; ry = rh / 2.0
+        cx = x + rw / 2.0; cy = y + rh / 2.0; rx = rw / 2.0; ry = rh / 2.0
         y_idx, x_idx = np.ogrid[y_start:y_end, x_start:x_end]
         if rx == 0 or ry == 0: return "N/A"
         mask = ((x_idx - cx)**2 / rx**2) + ((y_idx - cy)**2 / ry**2) <= 1.0
         roi_values = sub_img[mask]
         if len(roi_values) == 0: return "N/A"
-        mean_val = np.mean(roi_values); std_val = np.std(roi_values)
-        max_val = np.max(roi_values); min_val = np.min(roi_values)
+        mean_val = np.mean(roi_values); std_val = np.std(roi_values); max_val = np.max(roi_values); min_val = np.min(roi_values)
         if self.pixel_spacing: pixel_area = self.pixel_spacing[0] * self.pixel_spacing[1]; area_mm2 = len(roi_values) * pixel_area
         else: area_mm2 = len(roi_values) 
         return mean_val, std_val, max_val, min_val, area_mm2

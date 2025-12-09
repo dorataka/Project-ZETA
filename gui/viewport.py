@@ -2,7 +2,7 @@ import numpy as np
 import pydicom
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QMenu
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QRectF
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette, QAction
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette, QAction, QCursor
 
 from gui.canvas import ImageCanvas
 from core.loader import SeriesLoadWorker, MprBuilderWorker
@@ -21,7 +21,6 @@ class ZetaViewport(QFrame):
     processing_progress = pyqtSignal(int)
     processing_finish = pyqtSignal()
     
-    # 位置同期用
     cross_ref_pos_changed = pyqtSignal(object, int, int, int)
 
     def __init__(self, parent=None):
@@ -30,6 +29,9 @@ class ZetaViewport(QFrame):
         self.setLineWidth(2)
         self.setAcceptDrops(True)
         self.set_active(False)
+        
+        # マウス移動を常に追跡 (プローブ用)
+        self.setMouseTracking(True)
 
         self.current_slices = []
         self.current_file_paths = []
@@ -44,6 +46,9 @@ class ZetaViewport(QFrame):
         self.mip_mode = 'AVG'
         self.slab_thickness_mm = 0.0 
         
+        # プローブ状態
+        self.is_probe_mode = False
+
         self.window_level = 40
         self.window_width = 400
         self.current_tool_mode = 0 
@@ -68,7 +73,19 @@ class ZetaViewport(QFrame):
         if active: self.setStyleSheet("border: 2px solid #00FF00;") 
         else: self.setStyleSheet("border: 1px solid #333333;")
 
-    # --- ヘルパーメソッド ---
+    # --- プローブモード切替 ---
+    def set_probe_mode(self, active):
+        self.is_probe_mode = active
+        # 現在のマウス位置を取得して即時反映
+        if active:
+            # グローバル座標からローカル座標へ変換
+            local_pos = self.canvas.mapFromGlobal(QCursor.pos())
+            if self.canvas.rect().contains(local_pos):
+                self.canvas.set_probe_active(True, local_pos)
+        else:
+            self.canvas.set_probe_active(False)
+
+    # --- ヘルパー ---
     def _get_safe_dicom_value(self, ds, tag, default=None):
         val = ds.get(tag, default)
         if val is None: return default
@@ -115,6 +132,7 @@ class ZetaViewport(QFrame):
         elif self.view_plane == 'Sagittal': cx = self.current_index
         self.cross_ref_pos_changed.emit(self, cx, cy, cz)
 
+    # --- 描画更新 ---
     def update_display(self, emit_position=True):
         if self.is_mpr_enabled and self.volume_data is not None:
             self._render_mpr()
@@ -132,48 +150,91 @@ class ZetaViewport(QFrame):
 
     def apply_pan(self, dx, dy):
         if abs(dx)>1000 or abs(dy)>1000: return
-        self.canvas.pan_x += dx; self.canvas.pan_y += dy; self.canvas.update()
+        self.canvas.pan_x += dx
+        self.canvas.pan_y += dy
+        self.canvas.update()
+
     def apply_wl(self, dw, dl):
         if abs(dw)>10000 or abs(dl)>10000: return
-        self.window_width = max(1, self.window_width + dw); self.window_level += dl; self.update_display()
+        self.window_width = max(1, self.window_width + dw)
+        self.window_level += dl
+        self.update_display()
+
     def apply_zoom(self, delta_factor):
         if hasattr(self.canvas, 'zoom_factor'):
             new_zoom = self.canvas.zoom_factor + delta_factor
             self.canvas.zoom_factor = max(0.1, min(10.0, new_zoom))
             self.canvas.update()
 
+    # --- 状態保存・復元 ---
     def get_state(self):
         return {
-            'file_paths': self.current_file_paths, 'slices': self.current_slices, 'volume': self.volume_data,
-            'spacing': self.voxel_spacing, 'mpr_loaded': self.mpr_loaded, 'index': self.current_index,
-            'plane': self.view_plane, 'mpr_enabled': self.is_mpr_enabled, 'mip_mode': self.mip_mode,
-            'thickness': self.slab_thickness_mm, 'wl': self.window_level, 'ww': self.window_width,
-            'cached_wl': self._cached_wl, 'cached_ww': self._cached_ww, 'pan_x': self.canvas.pan_x,
-            'pan_y': self.canvas.pan_y, 'zoom': self.canvas.zoom_factor, 'tool_mode': self.current_tool_mode,
-            'measurements': self.canvas.measurements, 'rois': self.canvas.rois
+            'file_paths': self.current_file_paths,
+            'slices': self.current_slices,
+            'volume': self.volume_data,
+            'spacing': self.voxel_spacing,
+            'mpr_loaded': self.mpr_loaded,
+            'index': self.current_index,
+            'plane': self.view_plane,
+            'mpr_enabled': self.is_mpr_enabled,
+            'mip_mode': self.mip_mode,
+            'thickness': self.slab_thickness_mm,
+            'wl': self.window_level,
+            'ww': self.window_width,
+            'cached_wl': self._cached_wl,
+            'cached_ww': self._cached_ww,
+            'pan_x': self.canvas.pan_x,
+            'pan_y': self.canvas.pan_y,
+            'zoom': self.canvas.zoom_factor,
+            'tool_mode': self.current_tool_mode,
+            'measurements': self.canvas.measurements,
+            'rois': self.canvas.rois
         }
+
     def restore_state(self, state):
         if not state.get('file_paths'): return
-        self.current_file_paths = state['file_paths']; self.current_slices = state['slices']; self.volume_data = state['volume']
-        self.voxel_spacing = state['spacing']; self.mpr_loaded = state['mpr_loaded']; self.current_index = state['index']
-        self.view_plane = state['plane']; self.is_mpr_enabled = state['mpr_enabled']; self.mip_mode = state['mip_mode']
-        self.slab_thickness_mm = state['thickness']; self.window_level = state['wl']; self.window_width = state['ww']
-        self._cached_wl = state['cached_wl']; self._cached_ww = state['cached_ww']; self.canvas.pan_x = state['pan_x']
-        self.canvas.pan_y = state['pan_y']; self.canvas.zoom_factor = state['zoom']; self.canvas.measurements = state['measurements']
-        self.canvas.rois = state['rois']; self.current_tool_mode = state['tool_mode']; self.update_display(emit_position=False)
+        self.current_file_paths = state['file_paths']
+        self.current_slices = state['slices']
+        self.volume_data = state['volume']
+        self.voxel_spacing = state['spacing']
+        self.mpr_loaded = state['mpr_loaded']
+        self.current_index = state['index']
+        self.view_plane = state['plane']
+        self.is_mpr_enabled = state['mpr_enabled']
+        self.mip_mode = state['mip_mode']
+        self.slab_thickness_mm = state['thickness']
+        self.window_level = state['wl']
+        self.window_width = state['ww']
+        self._cached_wl = state['cached_wl']
+        self._cached_ww = state['cached_ww']
+        self.canvas.pan_x = state['pan_x']
+        self.canvas.pan_y = state['pan_y']
+        self.canvas.zoom_factor = state['zoom']
+        self.canvas.measurements = state['measurements']
+        self.canvas.rois = state['rois']
+        self.current_tool_mode = state['tool_mode']
+        self.update_display(emit_position=False)
 
     def set_mip_params(self, mode, thickness_mm):
         if not self.is_mpr_enabled: return
-        self.mip_mode = mode; self.slab_thickness_mm = max(0.0, float(thickness_mm)); self.update_display()
+        self.mip_mode = mode
+        self.slab_thickness_mm = max(0.0, float(thickness_mm))
+        self.update_display()
 
+    # --- MPR描画 ---
     def _render_mpr(self):
-        max_idx = self.get_max_index(); self.current_index = max(0, min(self.current_index, max_idx))
+        max_idx = self.get_max_index()
+        self.current_index = max(0, min(self.current_index, max_idx))
         try:
-            slice_img = None; aspect_ratio = 1.0; sp_z, sp_y, sp_x = self.voxel_spacing
+            slice_img = None
+            aspect_ratio = 1.0
+            sp_z, sp_y, sp_x = self.voxel_spacing
+            
             depth_spacing = 1.0
             if self.view_plane == 'Axial': depth_spacing = sp_z
             elif self.view_plane == 'Coronal': depth_spacing = sp_y
             elif self.view_plane == 'Sagittal': depth_spacing = sp_x
+            
             if depth_spacing > 0: half_slices = int((self.slab_thickness_mm / depth_spacing) / 2)
             else: half_slices = 0
             
@@ -181,7 +242,8 @@ class ZetaViewport(QFrame):
                 start = max(0, self.current_index - half_slices)
                 end = min(self.volume_data.shape[0], self.current_index + half_slices + 1)
                 slab = self.volume_data[start:end, :, :]
-                slice_img = self._project_slab(slab, axis=0); aspect_ratio = 1.0
+                slice_img = self._project_slab(slab, axis=0)
+                aspect_ratio = 1.0
             elif self.view_plane == 'Coronal':
                 start = max(0, self.current_index - half_slices)
                 end = min(self.volume_data.shape[1], self.current_index + half_slices + 1)
@@ -200,7 +262,8 @@ class ZetaViewport(QFrame):
             ds = self.current_slices[0] if self.current_slices else None
             hu_image = slice_img.astype(np.float32)
             self._process_and_send_image(hu_image, aspect_ratio, ds)
-        except Exception as e: print(f"MPR Error: {e}")
+        except Exception as e:
+            print(f"MPR Error: {e}")
 
     def _project_slab(self, slab, axis):
         if slab.shape[axis] == 0: return np.zeros((1,1), dtype=np.float32)
@@ -212,21 +275,32 @@ class ZetaViewport(QFrame):
         elif self.mip_mode == 'MinIP': return np.min(slab, axis=axis)
         else: return np.mean(slab, axis=axis)
 
+    # --- オーバーレイ ---
     def create_overlay_info(self, ds):
-        info = {}; name = ""; pid = ""; date = ""; inst = ""; desc = ""
+        info = {}
+        name = ""; pid = ""; date = ""; inst = ""; desc = ""
         if ds:
             def get_tag(tag, default=""): return str(ds.get(tag, default))
-            name = str(ds.get('PatientName', '')); pid = str(ds.get('PatientID', ''))
-            sex = str(ds.get('PatientSex', '')); age = str(ds.get('PatientAge', ''))
-            date = get_tag('StudyDate'); inst = get_tag('InstitutionName'); desc = get_tag('SeriesDescription')
-            info['TL'] = [name, pid, f"{sex} {age}"]; info['TR'] = [inst, date, desc]
+            name = str(ds.get('PatientName', ''))
+            pid = str(ds.get('PatientID', ''))
+            sex = str(ds.get('PatientSex', ''))
+            age = str(ds.get('PatientAge', ''))
+            date = get_tag('StudyDate')
+            inst = get_tag('InstitutionName')
+            desc = get_tag('SeriesDescription')
+            info['TL'] = [name, pid, f"{sex} {age}"]
+            info['TR'] = [inst, date, desc]
+        
         total = self.get_max_index() + 1
         mode_str = "Axial (2D)"
         if self.is_mpr_enabled:
             mode_str = f"{self.view_plane}"
-            if self.slab_thickness_mm > 0: mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
+            if self.slab_thickness_mm > 0:
+                mode_str += f" [{self.mip_mode} {self.slab_thickness_mm:.1f}mm]"
+        
         info['BL'] = [f"{mode_str}: {self.current_index + 1} / {total}", f"Zoom: {self.canvas.zoom_factor:.1f}x"]
         info['BR'] = [f"WL: {int(self.window_level)} WW: {int(self.window_width)}"]
+
         markers = {}
         if self.is_mpr_enabled:
             if self.view_plane == 'Axial': markers = {'T': 'A', 'B': 'P', 'L': 'R', 'R': 'L'}
@@ -235,7 +309,8 @@ class ZetaViewport(QFrame):
         elif ds and 'ImageOrientationPatient' in ds:
             try:
                 iop = [float(x) for x in ds.ImageOrientationPatient]
-                row_vec = iop[0:3]; col_vec = iop[3:6]
+                row_vec = iop[0:3]
+                col_vec = iop[3:6]
                 markers['R'] = self._get_orientation_label(row_vec)
                 markers['L'] = self._get_orientation_label([-x for x in row_vec])
                 markers['B'] = self._get_orientation_label(col_vec)
@@ -283,13 +358,6 @@ class ZetaViewport(QFrame):
         self.window_level = self._cached_wl; self.window_width = self._cached_ww
         self.update_display(emit_position=True)
 
-    def reset_wl_ww_to_dicom_defaults(self):
-        if self.current_slices:
-            ds = self.current_slices[0]
-            self.window_level = self._get_safe_dicom_value(ds, 'WindowCenter', 40)
-            self.window_width = self._get_safe_dicom_value(ds, 'WindowWidth', 400)
-            if self.window_width <= 0: self.window_width = 100
-
     def set_view_plane(self, plane):
         if not self.is_mpr_enabled: return
         self.view_plane = plane
@@ -319,8 +387,7 @@ class ZetaViewport(QFrame):
         if self.is_mpr_enabled and self.volume_data is not None:
             self._render_mpr()
             if emit_position: self.notify_position_change()
-        elif self.current_slices:
-            self._render_2d()
+        elif self.current_slices: self._render_2d()
 
     def _render_2d(self):
         self.current_index = max(0, min(self.current_index, len(self.current_slices) - 1))
@@ -345,13 +412,6 @@ class ZetaViewport(QFrame):
         pixmap = QPixmap.fromImage(q_img)
         overlay_info = self.create_overlay_info(ds_meta)
         self.canvas.set_pixmap(pixmap, self.canvas.pixel_spacing, self.current_index, hu_image, overlay_data=overlay_info, aspect_ratio=aspect_ratio)
-
-    def _get_safe_dicom_value(self, ds, tag, default=None):
-        val = ds.get(tag, default)
-        if val is None: return default
-        if isinstance(val, (list, pydicom.multival.MultiValue)): return float(val[0]) if len(val) > 0 else default
-        try: return float(val)
-        except: return default
 
     def get_max_index(self):
         if self.is_mpr_enabled and self.volume_data is not None:
@@ -378,14 +438,14 @@ class ZetaViewport(QFrame):
             dialog = DicomTagWindow(ds, self)
             dialog.exec()
 
-    # --- ★修正: マウスプレス時に位置情報を即時発信 ---
+    # --- イベントハンドラ ---
     def mousePressEvent(self, event):
         self.activated.emit(self, event.modifiers())
         self.last_mouse_pos = event.position()
         self.drag_accumulator = 0
         if event.button() == Qt.MouseButton.RightButton: self.is_right_dragged = False
         
-        # 左クリックされたら、即座に自分の位置を他画面に通知する
+        # クリック時に即位置通知
         if event.button() == Qt.MouseButton.LeftButton:
             self.notify_position_change()
 
@@ -404,11 +464,19 @@ class ZetaViewport(QFrame):
                     self.canvas.current_mode = 'ruler' if self.current_tool_mode == 1 else 'roi'; self.canvas.update()
 
     def mouseMoveEvent(self, event):
-        if self.last_mouse_pos is None: return
+        # ボタンを押してなくても座標更新
         current_pos = event.position()
+        if self.is_probe_mode:
+            self.canvas.update_probe_pos(current_pos)
+
+        if self.last_mouse_pos is None:
+            self.last_mouse_pos = current_pos
+            return
+
         delta_x = float(current_pos.x() - self.last_mouse_pos.x())
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
         buttons = event.buttons()
+
         if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton):
             self.is_right_dragged = True
             zoom_delta = -delta_y * 0.01; self.apply_zoom(zoom_delta); self.zoomed.emit(self, zoom_delta)
