@@ -1,8 +1,9 @@
 import os
+import re 
 from PyQt6.QtWidgets import (QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, 
                              QPushButton, QMessageBox, QListWidget, QListWidgetItem, 
                              QButtonGroup, QGridLayout, QSpinBox, QFrame, QProgressBar,
-                             QFileDialog)
+                             QFileDialog, QComboBox) 
 from PyQt6.QtCore import Qt, QPoint, QMimeData, QByteArray
 from PyQt6.QtGui import QKeyEvent, QDrag
 
@@ -27,7 +28,7 @@ class DraggableListWidget(QListWidget):
 class ZetaViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Project Z.E.T.A. - Hybrid Viewer")
+        self.setWindowTitle("Project Z.E.T.A. - MIP/MinIP (mm Edition)")
         self.resize(1600, 900)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -48,6 +49,7 @@ class ZetaViewer(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_panel)
         self.left_panel.setFixedWidth(280)
         
+        # 1. Grid
         self.grid_label = QLabel("GRID LAYOUT")
         self.left_layout.addWidget(self.grid_label)
         self.grid_ctrl_layout = QHBoxLayout()
@@ -62,8 +64,10 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addLayout(self.grid_ctrl_layout)
         self.left_layout.addSpacing(20)
 
+        # 2. MPR & MIP Controls
         self.mpr_label = QLabel("3D RECONSTRUCTION")
         self.left_layout.addWidget(self.mpr_label)
+        
         self.btn_mpr_enable = QPushButton("ENABLE MPR MODE")
         self.btn_mpr_enable.setCheckable(True)
         self.btn_mpr_enable.clicked.connect(self.toggle_mpr_mode)
@@ -80,18 +84,40 @@ class ZetaViewer(QMainWindow):
         self.mpr_group.addButton(self.btn_axial); self.mpr_group.addButton(self.btn_coronal); self.mpr_group.addButton(self.btn_sagittal)
         self.mpr_btns_layout.addWidget(self.btn_axial); self.mpr_btns_layout.addWidget(self.btn_coronal); self.mpr_btns_layout.addWidget(self.btn_sagittal)
         self.left_layout.addLayout(self.mpr_btns_layout)
+
+        # MIP/MinIP 設定
+        self.mip_layout = QHBoxLayout()
+        
+        self.combo_mip_mode = QComboBox()
+        self.combo_mip_mode.addItems(["AVG", "MIP", "MinIP"])
+        self.combo_mip_mode.currentIndexChanged.connect(self.update_mip_settings)
+        
+        # 厚み指定 (ComboBox + Editable)
+        self.combo_thickness = QComboBox()
+        self.combo_thickness.setEditable(True) 
+        presets = [f"{i} mm" for i in range(8)] # 0 mm ... 7 mm
+        presets.extend(["10 mm", "15 mm", "20 mm", "50 mm"])
+        self.combo_thickness.addItems(presets)
+        self.combo_thickness.setCurrentText("0 mm") 
+        
+        self.combo_thickness.editTextChanged.connect(self.update_mip_settings)
+        self.combo_thickness.currentIndexChanged.connect(self.update_mip_settings)
+        
+        self.mip_layout.addWidget(self.combo_mip_mode, 4)
+        self.mip_layout.addWidget(self.combo_thickness, 6)
+        self.left_layout.addLayout(self.mip_layout)
+        
         self.update_mpr_buttons_state(False)
         self.left_layout.addSpacing(20)
 
-        # プログレスバー
+        # Progress Bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #555; border-radius: 3px; text-align: center; } QProgressBar::chunk { background-color: #00FF00; }")
+        self.progress_bar.setRange(0, 100); self.progress_bar.setValue(0); self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #555; border-radius: 3px; text-align: center; color: white; } QProgressBar::chunk { background-color: #00FF00; }")
         self.left_layout.addWidget(self.progress_bar)
         self.left_layout.addSpacing(10)
 
+        # 3. Tools
         self.mode_label = QLabel("CONTROLLER MODE")
         self.left_layout.addWidget(self.mode_label)
         self.btn_nav = QPushButton("NAVIGATE"); self.btn_nav.setCheckable(True); self.btn_nav.setChecked(True)
@@ -105,42 +131,106 @@ class ZetaViewer(QMainWindow):
         self.left_layout.addWidget(self.btn_nav); self.left_layout.addWidget(self.btn_ruler); self.left_layout.addWidget(self.btn_roi)
         self.left_layout.addSpacing(20)
         
+        # 4. Series List
         self.series_label = QLabel("SERIES LIST")
         self.left_layout.addWidget(self.series_label)
         self.series_list_widget = DraggableListWidget()
         self.series_list_widget.itemClicked.connect(self.on_series_clicked) 
         self.left_layout.addWidget(self.series_list_widget)
-        
         self.open_btn = QPushButton("OPEN FOLDER")
         self.open_btn.clicked.connect(self.open_folder_dialog)
         self.left_layout.addWidget(self.open_btn)
-        
         self.main_layout.addWidget(self.left_panel)
 
+        # Right Panel
         self.right_panel = QWidget()
         self.grid_layout = QGridLayout(self.right_panel)
         self.grid_layout.setContentsMargins(0,0,0,0)
         self.grid_layout.setSpacing(2) 
         self.main_layout.addWidget(self.right_panel, 1)
 
+    # --- ★変更: コンボボックスを見やすくしたスタイル ---
     def apply_styles(self):
         self.setStyleSheet("""
             QMainWindow { background-color: #050505; }
             QLabel { color: #00FF00; font-family: 'Consolas'; font-weight: bold; } 
+            
+            /* リストと共通パーツ */
             QListWidget {
                 background-color: #111; border: 1px solid #005500; color: #00DD00; font-family: 'Consolas';
             }
             QListWidget::item:selected { background-color: #004400; color: #FFFFFF; }
+            
+            /* ボタン */
             QPushButton { 
                 background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 8px; font-family: 'Consolas'; font-weight: bold;
             }
             QPushButton:hover { background-color: #003300; }
             QPushButton:checked { background-color: #FFFF00; color: #000000; border: 1px solid #FFFF00; }
             QPushButton:disabled { background-color: #111; color: #555; border: 1px solid #333; }
+            
+            /* 入力系 (スピンボックス・コンボボックス) */
             QSpinBox {
                 background-color: #1a1a1a; color: #00FF00; border: 1px solid #005500; padding: 5px; font-family: 'Consolas';
             }
+            
+            /* ★コンボボックスの視認性向上 */
+            QComboBox {
+                background-color: #1a1a1a;
+                color: #00FF00;
+                border: 1px solid #005500;
+                padding: 5px;
+                padding-right: 20px; /* 矢印スペース確保 */
+                font-family: 'Consolas';
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left-width: 1px;
+                border-left-color: #005500;
+                border-left-style: solid;
+                background-color: #222; /* ボタン背景を少し明るく */
+            }
+            /* 下向き矢印をCSSで描画 */
+            QComboBox::down-arrow {
+                width: 0; 
+                height: 0; 
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #00FF00; /* 緑の三角形 */
+                margin-right: 5px;
+            }
+            /* ドロップダウンリストの中身 */
+            QComboBox QAbstractItemView {
+                background-color: #111;
+                color: #00FF00;
+                border: 1px solid #005500;
+                selection-background-color: #004400;
+            }
+            /* 直接入力エリアのスタイル */
+            QComboBox QLineEdit {
+                color: #00FF00; 
+                background-color: #1a1a1a;
+                border: none;
+            }
         """)
+
+    def update_mip_settings(self):
+        mode_idx = self.combo_mip_mode.currentIndex()
+        mode_str = 'AVG'
+        if mode_idx == 1: mode_str = 'MIP'
+        elif mode_idx == 2: mode_str = 'MinIP'
+        
+        text = self.combo_thickness.currentText()
+        thickness_mm = 0.0
+        try:
+            nums = re.findall(r"[-+]?\d*\.\d+|\d+", text)
+            if nums: thickness_mm = float(nums[0])
+        except: thickness_mm = 0.0
+        
+        for vp in self.selected_viewports:
+            vp.set_mip_params(mode_str, thickness_mm)
 
     def toggle_mpr_mode(self):
         is_mpr = self.btn_mpr_enable.isChecked()
@@ -153,6 +243,8 @@ class ZetaViewer(QMainWindow):
         self.btn_axial.setEnabled(enabled)
         self.btn_coronal.setEnabled(enabled)
         self.btn_sagittal.setEnabled(enabled)
+        self.combo_mip_mode.setEnabled(enabled)
+        self.combo_thickness.setEnabled(enabled)
         if enabled:
             self.mpr_label.setText("3D RECONSTRUCTION [ON]")
             self.mpr_label.setStyleSheet("color: #FF00FF;")
@@ -167,7 +259,6 @@ class ZetaViewer(QMainWindow):
     def on_apply_grid_clicked(self):
         rows = self.spin_rows.value(); cols = self.spin_cols.value()
         self.update_grid_layout(rows, cols)
-
     def update_grid_layout(self, rows, cols):
         for i in reversed(range(self.grid_layout.count())): 
             widget = self.grid_layout.itemAt(i).widget()
@@ -183,49 +274,41 @@ class ZetaViewer(QMainWindow):
                 vp.panned.connect(self.on_viewport_panned)
                 vp.wl_changed.connect(self.on_viewport_wl_changed)
                 vp.zoomed.connect(self.on_viewport_zoomed)
-                
-                # プログレス通知
                 vp.processing_start.connect(self.on_process_start)
                 vp.processing_progress.connect(self.on_process_progress)
                 vp.processing_finish.connect(self.on_process_finish)
-                
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
         if self.viewports: self.select_single_viewport(self.viewports[0])
-
-    # --- プログレス制御 ---
-    def on_process_start(self, message):
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.mpr_label.setText(f"BUSY: {message}")
     
-    def on_process_progress(self, val):
-        self.progress_bar.setValue(val)
-        
+    def on_process_start(self, message):
+        self.progress_bar.setVisible(True); self.progress_bar.setValue(0); self.mpr_label.setText(f"BUSY: {message}")
+    def on_process_progress(self, val): self.progress_bar.setValue(val)
     def on_process_finish(self):
-        self.progress_bar.setVisible(False)
-        self.mpr_label.setText("3D RECONSTRUCTION [ON]")
+        self.progress_bar.setVisible(False); self.mpr_label.setText("3D RECONSTRUCTION [ON]")
 
-    # --- 以下、既存 ---
     def on_viewport_activated(self, viewport, modifiers):
         is_shift = (modifiers & Qt.KeyboardModifier.ShiftModifier)
         if is_shift:
             if viewport in self.selected_viewports:
                 if len(self.selected_viewports) > 1:
-                    viewport.set_active(False)
-                    self.selected_viewports.remove(viewport)
+                    viewport.set_active(False); self.selected_viewports.remove(viewport)
             else:
-                viewport.set_active(True)
-                self.selected_viewports.add(viewport)
+                viewport.set_active(True); self.selected_viewports.add(viewport)
         else:
             if viewport in self.selected_viewports: pass
             else: self.select_single_viewport(viewport)
         self.apply_tool_mode_to_selected()
-        
         if self.selected_viewports:
             any_mpr = any(vp.is_mpr_enabled for vp in self.selected_viewports)
             self.btn_mpr_enable.setChecked(any_mpr)
             self.update_mpr_buttons_state(any_mpr)
+            first = list(self.selected_viewports)[0]
+            idx = 0
+            if first.mip_mode == 'MIP': idx = 1
+            elif first.mip_mode == 'MinIP': idx = 2
+            self.combo_mip_mode.setCurrentIndex(idx)
+            self.combo_thickness.setCurrentText(f"{first.slab_thickness_mm} mm")
 
     def select_single_viewport(self, viewport):
         for vp in self.viewports: vp.set_active(False)
@@ -244,26 +327,22 @@ class ZetaViewer(QMainWindow):
     def on_viewport_zoomed(self, sender, delta_factor):
         for vp in self.selected_viewports:
             if vp != sender: vp.apply_zoom(delta_factor)
-
     def on_viewport_series_dropped(self, target_viewport, uid):
         self.select_single_viewport(target_viewport)
         if uid in self.all_series_data:
             files = self.all_series_data[uid]['files']
             target_viewport.load_series(files)
-
     def set_mode(self, mode):
         if mode == 0: self.mode_label.setText("CONTROLLER MODE (NAV)"); self.mode_label.setStyleSheet("color: #00FF00;")
         elif mode == 1: self.mode_label.setText("CONTROLLER MODE (RULER)"); self.mode_label.setStyleSheet("color: #FFFF00;")
         elif mode == 2: self.mode_label.setText("CONTROLLER MODE (ROI)"); self.mode_label.setStyleSheet("color: #00FFFF;")
         self.apply_tool_mode_to_selected(mode)
-
     def apply_tool_mode_to_selected(self, mode=None):
         if mode is None:
             if self.btn_ruler.isChecked(): mode = 1
             elif self.btn_roi.isChecked(): mode = 2
             else: mode = 0
         for vp in self.selected_viewports: vp.set_tool_mode(mode)
-
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls(): event.accept()
         else: event.ignore()
