@@ -194,23 +194,33 @@ class ZetaViewer(QMainWindow):
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
     def on_viewport_rotated(self, sender, angle):
-        
         for vp in self.viewports:
             if vp == sender:
                 pass
-            else:               
+            else:
                 target_angle = angle
                 if vp.view_plane == 'Sagittal':
                     target_angle = angle + 90
                 
                 vp.rotation_angle = target_angle
                 vp.update_display(emit_position=False)
-            
-                sender.set_cross_ref_lines(vp, vp.current_index, vp.current_index, vp.current_index)
+        
+        # 最後に線を全体更新
+        self.update_all_cross_refs()
+
+    def update_all_cross_refs(self):
+        # 1. 全員の線をクリア
+        for vp in self.viewports:
+            vp.clear_cross_refs()
+        
+        # 2. 総当たりで線を追加 (自分以外から自分へ)
+        for target_vp in self.viewports:
+            for source_vp in self.viewports:
+                if target_vp != source_vp:
+                    target_vp.add_cross_ref_line(source_vp)
 
     def on_viewport_pos_changed(self, sender, cx, cy, cz):
-        if sender in self.selected_viewports:
-            for vp in self.viewports: vp.set_cross_ref_lines(sender, cx, cy, cz)
+        self.update_all_cross_refs()
 
     def on_apply_grid_clicked(self): pass
     def update_mip_settings(self):

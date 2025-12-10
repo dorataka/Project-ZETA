@@ -50,7 +50,6 @@ class ZetaViewport(QFrame):
         self.mip_mode = 'AVG'
         self.slab_thickness_mm = 0.0 
         
-        # プローブ状態
         self.is_probe_mode = False
 
         self.window_level = 40
@@ -65,6 +64,9 @@ class ZetaViewport(QFrame):
         self.last_mouse_pos = None
         self.drag_accumulator = 0
         self.is_right_dragged = False
+
+        self.is_rotating_line = False
+        self.drag_angle_offset = 0.0
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -98,31 +100,35 @@ class ZetaViewport(QFrame):
         try: return float(val)
         except: return default
 
-    # --- クロスリファレンス受信 ---
-    def set_cross_ref_lines(self, sender_vp, cx, cy, cz):
-        if sender_vp == self: 
-            self.canvas.cross_ref_lines = []
-            self.canvas.update()
-            return
-        
-        if not self.is_mpr_enabled or self.volume_data is None:
-            return
-
-        # 現在の画像サイズ情報を取得（これが中心計算の基準になります）
-        if self.canvas.pixmap is None: return
-        
-        img_w = self.canvas.pixmap.width()
-        img_h = self.canvas.pixmap.height()
-        screen_center_x = img_w / 2
-        screen_center_y = img_h / 2
-        
-        # ボリューム情報の取得
+    def get_current_coordinates(self):
+        if self.volume_data is None: return 0, 0, 0
         vc = self.volume_data.shape # (Z, Y, X)
-        vol_center_x = vc[2] // 2
-        vol_center_y = vc[1] // 2
-        vol_center_z = vc[0] // 2
+        cx, cy, cz = vc[2]//2, vc[1]//2, vc[0]//2
+        if self.view_plane == 'Axial': cz = self.current_index
+        elif self.view_plane == 'Coronal': cy = self.current_index
+        elif self.view_plane == 'Sagittal': cx = self.current_index
+        return cx, cy, cz
+
+    # ★追加2: 線をクリアする
+    def clear_cross_refs(self):
+        self.canvas.cross_ref_lines = []
+        self.canvas.update()
+
+    # ★追加3: 指定したビューポート(sender_vp)に対応する線を追加する
+    def add_cross_ref_line(self, sender_vp):
+        if self.volume_data is None: return
+
+        # 座標は相手から直接取得
+        cx, cy, cz = sender_vp.get_current_coordinates()
         
-        # スケーリング係数の再計算 (_render_mprと同じロジック)
+        # 画面サイズ等の取得
+        if self.canvas.pixmap is None: return
+        img_w = self.canvas.pixmap.width(); img_h = self.canvas.pixmap.height()
+        screen_center_x = img_w / 2; screen_center_y = img_h / 2
+        
+        vc = self.volume_data.shape
+        vol_center_x = vc[2] // 2; vol_center_y = vc[1] // 2; vol_center_z = vc[0] // 2
+        
         sp_z, sp_y, sp_x = self.voxel_spacing
         if sp_x <= 0: sp_x = 1.0; 
         if sp_y <= 0: sp_y = 1.0; 
@@ -132,20 +138,12 @@ class ZetaViewport(QFrame):
         scale_y = sp_x / sp_y
         scale_z = sp_x / sp_z
 
-        lines = []
+        new_lines = [] # 追加する線リスト
 
-        # ---------------------------------------------------------
-        # A. 自分が Axial (回転操作の親) の場合
-        # ---------------------------------------------------------
         if self.view_plane == 'Axial':
-            # 線の中心位置を計算 (画像中心 + インデックス差分)
-            # Axialは X, Y軸ともに正方向
             my_cx = screen_center_x + (cx - vol_center_x) * scale_x
             my_cy = screen_center_y + (cy - vol_center_y) * scale_y
-
             angle = sender_vp.rotation_angle 
-            
-            # 巨大な対角線
             diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
 
             def get_rotated_line(center_x, center_y, angle_deg, color_code):
@@ -157,44 +155,33 @@ class ZetaViewport(QFrame):
                 return {'start': p1, 'end': p2, 'color': QColor(color_code)}
 
             if sender_vp.view_plane == 'Coronal':
-                lines.append(get_rotated_line(my_cx, my_cy, angle, "#0000FF"))
+                new_lines.append(get_rotated_line(my_cx, my_cy, angle, "#0000FF"))
             elif sender_vp.view_plane == 'Sagittal':
-                lines.append(get_rotated_line(my_cx, my_cy, angle + 90, "#FF0000"))
+                new_lines.append(get_rotated_line(my_cx, my_cy, angle + 90, "#FF0000"))
             
-        # ---------------------------------------------------------
-        # B. 自分が Coronal / Sagittal (回転している側) の場合
-        # ---------------------------------------------------------
-        else:
-            # ここがズレの原因でした。「画像中心」からの差分で計算します。
-            
-            # 1. 縦線 (Sagittal Planeの位置) -> X軸方向のズレ
-            # Coronal/Sagittalともに、横軸は「ボリュームの中心からの水平距離」
-            # Coronal: X軸 (cx), Sagittal: Y軸 (cy)
-            
+        else: # Coronal / Sagittal
             target_idx_x = cx if self.view_plane == 'Coronal' else cy
             center_idx_x = vol_center_x if self.view_plane == 'Coronal' else vol_center_y
             chk_scale_x  = scale_x if self.view_plane == 'Coronal' else scale_y
-            
-            # 画像上のX座標 = 画面中心 + (ターゲット - ボリューム中心) * スケール
             pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
-            
-            # 2. 横線 (Axial Planeの位置) -> Y軸方向のズレ (Z軸)
-            # _render_mpr で vec_down = (0,0,-1) としているので、
-            # 画面の下(Y+)に行くほど、Zインデックスは減る(Z-)関係にあります。
-            # つまり符号が反転します。
             
             target_idx_y = cz
             center_idx_y = vol_center_z
             chk_scale_y  = scale_z
-            
-            # 画像上のY座標 = 画面中心 - (ターゲット - ボリューム中心) * スケール
             pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
             
-            # 線を追加
-            lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#FFFF00")})
-            lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#FFFF00")})
+            # Axial線を追加
+            if sender_vp.view_plane == 'Axial':
+                new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")}) # 緑 (Axial用)
+            
+            # 互いの線 (Sagittal <-> Coronal)
+            if self.view_plane == 'Coronal' and sender_vp.view_plane == 'Sagittal':
+                new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#FF0000")})
+            if self.view_plane == 'Sagittal' and sender_vp.view_plane == 'Coronal':
+                new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#0000FF")})
 
-        self.canvas.cross_ref_lines = lines
+        # リストに追加（上書きしない）
+        self.canvas.cross_ref_lines.extend(new_lines)
         self.canvas.update()
 
     # --- 位置情報発信 ---
@@ -579,8 +566,24 @@ class ZetaViewport(QFrame):
         self.drag_accumulator = 0
         if event.button() == Qt.MouseButton.RightButton: self.is_right_dragged = False
         
-        # クリック時に即位置通知
         if event.button() == Qt.MouseButton.LeftButton:
+            # 1. 先にヒットテストを行う (線があれば回転モードへ)
+            if self.view_plane == 'Axial' and self.current_tool_mode == 0:
+                canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
+                hit_type, _ = self.canvas.hit_test(canvas_pos)
+                
+                if hit_type == 'cross_ref':
+                    self.is_rotating_line = True
+                    # 角度オフセット計算
+                    rect = self.rect()
+                    center = rect.center()
+                    dx = event.position().x() - center.x()
+                    dy = event.position().y() - center.y()
+                    mouse_angle = np.degrees(np.arctan2(dy, dx))
+                    self.drag_angle_offset = self.rotation_angle - mouse_angle
+                    return # 回転操作に入ったので、座標通知（パンニング）は行わずに終了
+            
+            # 2. 線をつかまなかった場合のみ、座標変更（ナビゲーション）を行う
             self.notify_position_change()
 
         buttons = event.buttons()
@@ -603,9 +606,30 @@ class ZetaViewport(QFrame):
         if self.is_probe_mode:
             self.canvas.update_probe_pos(current_pos)
 
+        if self.view_plane == 'Axial' and self.current_tool_mode == 0 and not (event.buttons() & Qt.MouseButton.LeftButton):
+             canvas_pos = self.canvas.mapFrom(self, current_pos.toPoint())
+             hit_type, _ = self.canvas.hit_test(canvas_pos)
+             if hit_type == 'cross_ref':
+                 self.setCursor(Qt.CursorShape.PointingHandCursor)
+             else:
+                 self.setCursor(Qt.CursorShape.ArrowCursor)
+
         if self.last_mouse_pos is None:
             self.last_mouse_pos = current_pos
             return
+
+        if self.is_rotating_line:
+             rect = self.rect()
+             center = rect.center()
+             dx = current_pos.x() - center.x()
+             dy = current_pos.y() - center.y()
+             
+             mouse_angle = np.degrees(np.arctan2(dy, dx))
+             new_angle = mouse_angle + self.drag_angle_offset
+             
+             self.rotation_changed.emit(self, new_angle)
+             self.last_mouse_pos = current_pos
+             return
 
         delta_x = float(current_pos.x() - self.last_mouse_pos.x())
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
@@ -621,15 +645,11 @@ class ZetaViewport(QFrame):
              dx = current_pos.x() - center.x()
              dy = current_pos.y() - center.y()
              
-             # アークタンジェントで角度(ラジアン)を求める (-π ～ +π)
              angle_rad = np.arctan2(dy, dx)
              angle_deg = np.degrees(angle_rad)
              
-             # シグナル発信
              self.rotation_changed.emit(self, angle_deg)
              
-             # 回転操作中は他の操作（パンニングなど）をさせないためにここでreturn
-             # last_mouse_posは更新しておく
              self.last_mouse_pos = current_pos
              return
 
@@ -651,6 +671,9 @@ class ZetaViewport(QFrame):
         self.last_mouse_pos = current_pos
 
     def mouseReleaseEvent(self, event):
+        if self.is_rotating_line:
+            self.is_rotating_line = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
         if event.button() == Qt.MouseButton.RightButton:
             if not self.is_right_dragged: self.show_context_menu(event.globalPosition().toPoint())
             self.is_right_dragged = False

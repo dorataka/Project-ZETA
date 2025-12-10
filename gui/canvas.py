@@ -305,6 +305,8 @@ class ImageCanvas(QWidget):
     def hit_test(self, screen_pos):
         if isinstance(screen_pos, QPoint): target_point = QPointF(screen_pos)
         else: target_point = screen_pos
+        
+        # 1. ROIの判定
         for i, roi in enumerate(self.rois):
             if roi.get('slice_index', -1) != self.current_slice_index: continue
             rect_img = roi['rect']
@@ -316,15 +318,39 @@ class ImageCanvas(QWidget):
             if rx > 0 and ry > 0:
                 normalized_dist = ((target_point.x() - cx) / rx)**2 + ((target_point.y() - cy) / ry)**2
                 if normalized_dist <= 1.2: return ('roi', i)
-        min_dist = float('inf'); closest_ruler = None
+
+        # 2. 線（定規 または リファレンス線）の判定
+        min_dist = float('inf')
+        closest_item = None
+        item_type = None
+
+        # A. 計測定規 (Ruler) のチェック
         for i, m in enumerate(self.measurements):
             if m.get('slice_index', -1) != self.current_slice_index: continue
             p1 = self.image_to_screen(m['start'])
             p2 = self.image_to_screen(m['end'])
             dist = distance_point_to_segment(target_point, p1, p2)
             if dist < 8.0 and dist < min_dist:
-                min_dist = dist; closest_ruler = i
-        if closest_ruler is not None: return ('ruler', closest_ruler)
+                min_dist = dist
+                closest_item = i
+                item_type = 'ruler'
+        
+        # B. ★追加: クロスリファレンス線のチェック
+        if self.cross_ref_lines:
+            for i, line in enumerate(self.cross_ref_lines):
+                # start/end を持つ（斜め線）場合のみ判定
+                if 'start' in line and 'end' in line:
+                    p1 = self.image_to_screen(line['start'])
+                    p2 = self.image_to_screen(line['end'])
+                    dist = distance_point_to_segment(target_point, p1, p2)
+                    
+                    # 定規よりも近ければこちらを優先（または同じ距離なら上書き）
+                    if dist < 8.0 and dist < min_dist:
+                        min_dist = dist
+                        closest_item = i
+                        item_type = 'cross_ref'
+
+        if closest_item is not None: return (item_type, closest_item)
         return (None, None)
 
     def delete_selected_measurement(self):
