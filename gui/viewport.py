@@ -7,6 +7,7 @@ from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette, QAction, QCursor
 from gui.canvas import ImageCanvas
 from core.loader import SeriesLoadWorker, MprBuilderWorker
 from gui.tag_window import DicomTagWindow
+from core.mpr_logic import get_resampled_slice, get_rotation_matrix
 
 class ZetaViewport(QFrame):
     activated = pyqtSignal(object, object)
@@ -42,6 +43,8 @@ class ZetaViewport(QFrame):
         self.current_index = 0
         self.view_plane = 'Axial'
         self.is_mpr_enabled = False 
+
+        self.rotation_angle = 0.0
         
         self.mip_mode = 'AVG'
         self.slab_thickness_mm = 0.0 
@@ -223,47 +226,110 @@ class ZetaViewport(QFrame):
 
     # --- MPR描画 ---
     def _render_mpr(self):
-        max_idx = self.get_max_index()
-        self.current_index = max(0, min(self.current_index, max_idx))
+        # ボリュームが無ければ何もしない
+        if self.volume_data is None: return
+       
+        vc = self.volume_data.shape # (Z, Y, X)
+        
+        # ボリュームの中心
+        center_x = vc[2] // 2
+        center_y = vc[1] // 2
+        center_z = vc[0] // 2
+        
+        # スクロールによる中心移動の反映
+        if self.view_plane == 'Axial':
+            center_z = self.current_index
+        elif self.view_plane == 'Coronal':
+            center_y = self.current_index
+        elif self.view_plane == 'Sagittal':
+            center_x = self.current_index
+
+        center_point = (center_x, center_y, center_z)
+        
+        if self.view_plane == 'Axial':
+            vec_right  = np.array([1, 0, 0])
+            vec_down   = np.array([0, 1, 0])
+            vec_normal = np.array([0, 0, 1]) # 奥行き (Z)
+            axis_rot   = 'z'
+        elif self.view_plane == 'Coronal':
+            vec_right  = np.array([1, 0, 0])
+            vec_down   = np.array([0, 0, -1])
+            vec_normal = np.array([0, 1, 0]) # 奥行き (Y)
+            axis_rot   = 'y'
+        elif self.view_plane == 'Sagittal':
+            vec_right  = np.array([0, 1, 0])
+            vec_down   = np.array([0, 0, -1])
+            vec_normal = np.array([1, 0, 0]) # 奥行き (X)
+            axis_rot   = 'x'
+
+        # 回転行列の適用 (現在は angle=0 なので無回転だが、ここを変えれば回る)
+        rot_mat = get_rotation_matrix(axis_rot, self.rotation_angle)
+        
+        # ベクトルを回転させる
+        vec_right_rot = rot_mat @ vec_right
+        vec_down_rot  = rot_mat @ vec_down
+        
+        # 表示サイズ (Canvasのサイズに合わせるか、ボリューム全体をカバーするか)
+        # ここでは簡易的に「ボリュームの最大辺」を基準に正方形で作る
+        dim = max(vc)
+        req_w = int(dim * 1.2) # 少し余裕を持たせる
+        req_h = int(dim * 1.2)
+        
         try:
-            slice_img = None
-            aspect_ratio = 1.0
+            # 1. ボクセルスペーシングを取得 (Z, Y, X)
             sp_z, sp_y, sp_x = self.voxel_spacing
             
-            depth_spacing = 1.0
-            if self.view_plane == 'Axial': depth_spacing = sp_z
-            elif self.view_plane == 'Coronal': depth_spacing = sp_y
-            elif self.view_plane == 'Sagittal': depth_spacing = sp_x
+            # 安全策: ゼロ除算防止
+            if sp_x <= 0: sp_x = 1.0
+            if sp_y <= 0: sp_y = 1.0
+            if sp_z <= 0: sp_z = 1.0
+
+            scale_x = 1.0               # X軸基準
+            scale_y = sp_x / sp_y       # Y軸の補正値
+            scale_z = sp_x / sp_z       # Z軸の補正値
+
+            spacing_scale = np.array([scale_x, scale_y, scale_z])
+
+            # 3. 回転行列の適用
+            rot_mat = get_rotation_matrix(axis_rot, self.rotation_angle)
             
-            if depth_spacing > 0: half_slices = int((self.slab_thickness_mm / depth_spacing) / 2)
-            else: half_slices = 0
+            vec_right_rot = rot_mat @ vec_right
+            vec_down_rot  = rot_mat @ vec_down
+            vec_normal_rot = rot_mat @ vec_normal
             
-            if self.view_plane == 'Axial':
-                start = max(0, self.current_index - half_slices)
-                end = min(self.volume_data.shape[0], self.current_index + half_slices + 1)
-                slab = self.volume_data[start:end, :, :]
-                slice_img = self._project_slab(slab, axis=0)
-                aspect_ratio = 1.0
-            elif self.view_plane == 'Coronal':
-                start = max(0, self.current_index - half_slices)
-                end = min(self.volume_data.shape[1], self.current_index + half_slices + 1)
-                slab = self.volume_data[:, start:end, :]
-                proj = self._project_slab(slab, axis=1)
-                slice_img = np.flipud(proj)
-                if sp_x > 0: aspect_ratio = sp_z / sp_x
-            elif self.view_plane == 'Sagittal':
-                start = max(0, self.current_index - half_slices)
-                end = min(self.volume_data.shape[2], self.current_index + half_slices + 1)
-                slab = self.volume_data[:, :, start:end]
-                proj = self._project_slab(slab, axis=2)
-                slice_img = np.flipud(proj)
-                if sp_y > 0: aspect_ratio = sp_z / sp_y
+            # 4. ★ここが重要: 物理サイズに基づくスケーリングを適用
+            # これを忘れると、スライス厚の分だけ画像が潰れてしまいます
+            vec_right_final = vec_right_rot * spacing_scale
+            vec_down_final  = vec_down_rot  * spacing_scale
+            vec_normal_final = vec_normal_rot * spacing_scale
+
+            dim = max(vc)
+            req_w = int(dim * 1.2)
+            req_h = int(dim * 1.2)
             
+            # リサンプリング実行 (補正済みのベクトル final を渡す)
+            slice_img = get_resampled_slice(
+                self.volume_data,
+                center_point,
+                vec_right_final,
+                vec_down_final,
+                vec_normal_final,     # 追加
+                req_w, req_h,
+                self.voxel_spacing,
+                self.slab_thickness_mm, # 追加
+                self.mip_mode           # 追加
+            )
+            
+            # --- 画像生成と表示 ---
             ds = self.current_slices[0] if self.current_slices else None
             hu_image = slice_img.astype(np.float32)
-            self._process_and_send_image(hu_image, aspect_ratio, ds)
+
+            self._process_and_send_image(hu_image, 1.0, ds)
+            
         except Exception as e:
-            print(f"MPR Error: {e}")
+            print(f"MPR Render Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _project_slab(self, slab, axis):
         if slab.shape[axis] == 0: return np.zeros((1,1), dtype=np.float32)
