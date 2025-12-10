@@ -1,9 +1,8 @@
 import numpy as np
 import pydicom
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QMenu
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette, QAction, QCursor
-
 from gui.canvas import ImageCanvas
 from core.loader import SeriesLoadWorker, MprBuilderWorker
 from gui.tag_window import DicomTagWindow
@@ -23,6 +22,8 @@ class ZetaViewport(QFrame):
     processing_finish = pyqtSignal()
     
     cross_ref_pos_changed = pyqtSignal(object, int, int, int)
+
+    rotation_changed = pyqtSignal(object, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,7 +45,7 @@ class ZetaViewport(QFrame):
         self.view_plane = 'Axial'
         self.is_mpr_enabled = False 
 
-        self.rotation_angle = 0.0
+        self.rotation_angle = 0
         
         self.mip_mode = 'AVG'
         self.slab_thickness_mm = 0.0 
@@ -107,20 +108,91 @@ class ZetaViewport(QFrame):
         if not self.is_mpr_enabled or self.volume_data is None:
             return
 
-        lines = []
-        color = QColor("#FFFF00") 
+        # 現在の画像サイズ情報を取得（これが中心計算の基準になります）
+        if self.canvas.pixmap is None: return
         
+        img_w = self.canvas.pixmap.width()
+        img_h = self.canvas.pixmap.height()
+        screen_center_x = img_w / 2
+        screen_center_y = img_h / 2
+        
+        # ボリューム情報の取得
+        vc = self.volume_data.shape # (Z, Y, X)
+        vol_center_x = vc[2] // 2
+        vol_center_y = vc[1] // 2
+        vol_center_z = vc[0] // 2
+        
+        # スケーリング係数の再計算 (_render_mprと同じロジック)
+        sp_z, sp_y, sp_x = self.voxel_spacing
+        if sp_x <= 0: sp_x = 1.0; 
+        if sp_y <= 0: sp_y = 1.0; 
+        if sp_z <= 0: sp_z = 1.0
+        
+        scale_x = 1.0
+        scale_y = sp_x / sp_y
+        scale_z = sp_x / sp_z
+
+        lines = []
+
+        # ---------------------------------------------------------
+        # A. 自分が Axial (回転操作の親) の場合
+        # ---------------------------------------------------------
         if self.view_plane == 'Axial':
-            lines.append({'type': 'H', 'pos': cy, 'color': color})
-            lines.append({'type': 'V', 'pos': cx, 'color': color})
-        elif self.view_plane == 'Coronal':
-            z_idx = self.volume_data.shape[0] - 1 - cz
-            lines.append({'type': 'H', 'pos': z_idx, 'color': color})
-            lines.append({'type': 'V', 'pos': cx, 'color': color})
-        elif self.view_plane == 'Sagittal':
-            z_idx = self.volume_data.shape[0] - 1 - cz
-            lines.append({'type': 'H', 'pos': z_idx, 'color': color})
-            lines.append({'type': 'V', 'pos': cy, 'color': color})
+            # 線の中心位置を計算 (画像中心 + インデックス差分)
+            # Axialは X, Y軸ともに正方向
+            my_cx = screen_center_x + (cx - vol_center_x) * scale_x
+            my_cy = screen_center_y + (cy - vol_center_y) * scale_y
+
+            angle = sender_vp.rotation_angle 
+            
+            # 巨大な対角線
+            diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
+
+            def get_rotated_line(center_x, center_y, angle_deg, color_code):
+                rad = np.radians(angle_deg)
+                dx = np.cos(rad) * diag_len
+                dy = np.sin(rad) * diag_len
+                p1 = QPointF(center_x - dx, center_y - dy)
+                p2 = QPointF(center_x + dx, center_y + dy)
+                return {'start': p1, 'end': p2, 'color': QColor(color_code)}
+
+            if sender_vp.view_plane == 'Coronal':
+                lines.append(get_rotated_line(my_cx, my_cy, angle, "#0000FF"))
+            elif sender_vp.view_plane == 'Sagittal':
+                lines.append(get_rotated_line(my_cx, my_cy, angle + 90, "#FF0000"))
+            
+        # ---------------------------------------------------------
+        # B. 自分が Coronal / Sagittal (回転している側) の場合
+        # ---------------------------------------------------------
+        else:
+            # ここがズレの原因でした。「画像中心」からの差分で計算します。
+            
+            # 1. 縦線 (Sagittal Planeの位置) -> X軸方向のズレ
+            # Coronal/Sagittalともに、横軸は「ボリュームの中心からの水平距離」
+            # Coronal: X軸 (cx), Sagittal: Y軸 (cy)
+            
+            target_idx_x = cx if self.view_plane == 'Coronal' else cy
+            center_idx_x = vol_center_x if self.view_plane == 'Coronal' else vol_center_y
+            chk_scale_x  = scale_x if self.view_plane == 'Coronal' else scale_y
+            
+            # 画像上のX座標 = 画面中心 + (ターゲット - ボリューム中心) * スケール
+            pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
+            
+            # 2. 横線 (Axial Planeの位置) -> Y軸方向のズレ (Z軸)
+            # _render_mpr で vec_down = (0,0,-1) としているので、
+            # 画面の下(Y+)に行くほど、Zインデックスは減る(Z-)関係にあります。
+            # つまり符号が反転します。
+            
+            target_idx_y = cz
+            center_idx_y = vol_center_z
+            chk_scale_y  = scale_z
+            
+            # 画像上のY座標 = 画面中心 - (ターゲット - ボリューム中心) * スケール
+            pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
+            
+            # 線を追加
+            lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#FFFF00")})
+            lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#FFFF00")})
 
         self.canvas.cross_ref_lines = lines
         self.canvas.update()
@@ -228,7 +300,7 @@ class ZetaViewport(QFrame):
     def _render_mpr(self):
         # ボリュームが無ければ何もしない
         if self.volume_data is None: return
-       
+        
         vc = self.volume_data.shape # (Z, Y, X)
         
         # ボリュームの中心
@@ -246,35 +318,30 @@ class ZetaViewport(QFrame):
 
         center_point = (center_x, center_y, center_z)
         
+        # ★修正ポイント1: ベクトル定義と回転軸の統一
+        # 重複していたコードを削除し、ここで定義します。
+        # 重要なのは axis_rot = 'z' です。どの断面でも「人体の上下方向(Z)」を軸に回転させます。
+
+        axis_rot = 'z' # 全ビューポートでZ軸回転（Swivel）を採用
+
         if self.view_plane == 'Axial':
+            # Axial: 通常のXY平面
             vec_right  = np.array([1, 0, 0])
             vec_down   = np.array([0, 1, 0])
             vec_normal = np.array([0, 0, 1]) # 奥行き (Z)
-            axis_rot   = 'z'
         elif self.view_plane == 'Coronal':
+            # Coronal: XZ平面だが、Z軸回転させるためにX軸とY軸(奥行き)を回す
             vec_right  = np.array([1, 0, 0])
-            vec_down   = np.array([0, 0, -1])
-            vec_normal = np.array([0, 1, 0]) # 奥行き (Y)
-            axis_rot   = 'y'
+            vec_down   = np.array([0, 0, -1]) # Z軸(下)は固定
+            vec_normal = np.array([0, 1, 0])  # Y軸(奥行き)
         elif self.view_plane == 'Sagittal':
+            # Sagittal: YZ平面
             vec_right  = np.array([0, 1, 0])
-            vec_down   = np.array([0, 0, -1])
-            vec_normal = np.array([1, 0, 0]) # 奥行き (X)
-            axis_rot   = 'x'
+            vec_down   = np.array([0, 0, -1]) # Z軸(下)は固定
+            vec_normal = np.array([1, 0, 0])  # X軸(奥行き)
 
-        # 回転行列の適用 (現在は angle=0 なので無回転だが、ここを変えれば回る)
-        rot_mat = get_rotation_matrix(axis_rot, self.rotation_angle)
-        
-        # ベクトルを回転させる
-        vec_right_rot = rot_mat @ vec_right
-        vec_down_rot  = rot_mat @ vec_down
-        
-        # 表示サイズ (Canvasのサイズに合わせるか、ボリューム全体をカバーするか)
-        # ここでは簡易的に「ボリュームの最大辺」を基準に正方形で作る
-        dim = max(vc)
-        req_w = int(dim * 1.2) # 少し余裕を持たせる
-        req_h = int(dim * 1.2)
-        
+        # ★重複コード削除: ここにあった rot_mat の計算などは削除し、tryブロック内にまとめます
+
         try:
             # 1. ボクセルスペーシングを取得 (Z, Y, X)
             sp_z, sp_y, sp_x = self.voxel_spacing
@@ -291,33 +358,34 @@ class ZetaViewport(QFrame):
             spacing_scale = np.array([scale_x, scale_y, scale_z])
 
             # 3. 回転行列の適用
+            # axis_rot は上で 'z' に固定しました
             rot_mat = get_rotation_matrix(axis_rot, self.rotation_angle)
             
-            vec_right_rot = rot_mat @ vec_right
-            vec_down_rot  = rot_mat @ vec_down
+            vec_right_rot  = rot_mat @ vec_right
+            vec_down_rot   = rot_mat @ vec_down
             vec_normal_rot = rot_mat @ vec_normal
             
-            # 4. ★ここが重要: 物理サイズに基づくスケーリングを適用
-            # これを忘れると、スライス厚の分だけ画像が潰れてしまいます
-            vec_right_final = vec_right_rot * spacing_scale
-            vec_down_final  = vec_down_rot  * spacing_scale
+            # 4. 物理サイズに基づくスケーリングを適用
+            vec_right_final  = vec_right_rot  * spacing_scale
+            vec_down_final   = vec_down_rot   * spacing_scale
             vec_normal_final = vec_normal_rot * spacing_scale
 
+            # 表示サイズ
             dim = max(vc)
             req_w = int(dim * 1.2)
             req_h = int(dim * 1.2)
             
-            # リサンプリング実行 (補正済みのベクトル final を渡す)
+            # リサンプリング実行
             slice_img = get_resampled_slice(
                 self.volume_data,
                 center_point,
                 vec_right_final,
                 vec_down_final,
-                vec_normal_final,     # 追加
+                vec_normal_final,
                 req_w, req_h,
                 self.voxel_spacing,
-                self.slab_thickness_mm, # 追加
-                self.mip_mode           # 追加
+                self.slab_thickness_mm,
+                self.mip_mode
             )
             
             # --- 画像生成と表示 ---
@@ -542,6 +610,28 @@ class ZetaViewport(QFrame):
         delta_x = float(current_pos.x() - self.last_mouse_pos.x())
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
         buttons = event.buttons()
+        modifiers = event.modifiers()
+
+        if (buttons & Qt.MouseButton.LeftButton) and (modifiers & Qt.KeyboardModifier.AltModifier):
+             # 画面中心からの角度を計算
+             rect = self.rect()
+             center = rect.center()
+             
+             # 現在のマウス位置と中心との差分
+             dx = current_pos.x() - center.x()
+             dy = current_pos.y() - center.y()
+             
+             # アークタンジェントで角度(ラジアン)を求める (-π ～ +π)
+             angle_rad = np.arctan2(dy, dx)
+             angle_deg = np.degrees(angle_rad)
+             
+             # シグナル発信
+             self.rotation_changed.emit(self, angle_deg)
+             
+             # 回転操作中は他の操作（パンニングなど）をさせないためにここでreturn
+             # last_mouse_posは更新しておく
+             self.last_mouse_pos = current_pos
+             return
 
         if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton):
             self.is_right_dragged = True

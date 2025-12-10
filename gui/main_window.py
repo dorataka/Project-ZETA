@@ -152,7 +152,6 @@ class ZetaViewer(QMainWindow):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
             for vp in self.selected_viewports: vp.delete_measurement()
         
-        # ★追加: ZキーでプローブON
         elif event.key() == Qt.Key.Key_Z:
             for vp in self.viewports:
                 vp.set_probe_mode(True)
@@ -160,14 +159,12 @@ class ZetaViewer(QMainWindow):
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent):
-        # ★追加: Zキー解放でプローブOFF
         if event.key() == Qt.Key.Key_Z:
             for vp in self.viewports:
                 vp.set_probe_mode(False)
         
         super().keyReleaseEvent(event)
 
-    # ... (他は変更なし) ...
     def update_grid_layout(self, rows, cols):
         existing_states = []
         for vp in self.viewports: existing_states.append(vp.get_state())
@@ -189,11 +186,27 @@ class ZetaViewer(QMainWindow):
                 vp.processing_progress.connect(self.on_process_progress)
                 vp.processing_finish.connect(self.on_process_finish)
                 vp.cross_ref_pos_changed.connect(self.on_viewport_pos_changed)
+                vp.rotation_changed.connect(self.on_viewport_rotated)
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
         for i, vp in enumerate(self.viewports):
             if i < len(existing_states): vp.restore_state(existing_states[i])
         if self.viewports: self.select_single_viewport(self.viewports[0])
+
+    def on_viewport_rotated(self, sender, angle):
+        
+        for vp in self.viewports:
+            if vp == sender:
+                pass
+            else:               
+                target_angle = angle
+                if vp.view_plane == 'Sagittal':
+                    target_angle = angle + 90
+                
+                vp.rotation_angle = target_angle
+                vp.update_display(emit_position=False)
+            
+                sender.set_cross_ref_lines(vp, vp.current_index, vp.current_index, vp.current_index)
 
     def on_viewport_pos_changed(self, sender, cx, cy, cz):
         if sender in self.selected_viewports:

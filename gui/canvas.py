@@ -218,19 +218,37 @@ class ImageCanvas(QWidget):
 
     def draw_cross_refs(self, painter):
         if not self.cross_ref_lines: return
+        
         painter.setClipRect(self.rect())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        
         for line in self.cross_ref_lines:
             color = line.get('color', QColor("#FFFF00"))
-            pos_img = line['pos']
-            pen = QPen(color); pen.setWidth(1); pen.setStyle(Qt.PenStyle.DashLine); painter.setPen(pen)
-            if line['type'] == 'V':
-                p_top = self.image_to_screen(QPointF(pos_img, 0))
-                p_bottom = self.image_to_screen(QPointF(pos_img, self.pixmap.height()))
-                painter.drawLine(int(p_top.x()), 0, int(p_bottom.x()), self.height())
-            elif line['type'] == 'H':
-                p_left = self.image_to_screen(QPointF(0, pos_img))
-                p_right = self.image_to_screen(QPointF(self.pixmap.width(), pos_img))
-                painter.drawLine(0, int(p_left.y()), self.width(), int(p_right.y()))
+            pen = QPen(color)
+            pen.setWidth(2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            
+            # ★修正: 「斜めの線」情報 (start/end) を持っている場合
+            if 'start' in line and 'end' in line:
+                p1 = self.image_to_screen(line['start'])
+                p2 = self.image_to_screen(line['end'])
+                painter.drawLine(p1, p2)
+                
+            # ★修正: 「従来の水平・垂直線」情報 (type/pos) を持っている場合
+            # (ここを elif にしてキーの存在確認をしないと、KeyErrorになります)
+            elif 'type' in line and 'pos' in line:
+                pos_img = line['pos']
+                if line['type'] == 'V':
+                    p_top = self.image_to_screen(QPointF(pos_img, 0))
+                    p_bottom = self.image_to_screen(QPointF(pos_img, self.pixmap.height()))
+                    painter.drawLine(int(p_top.x()), 0, int(p_bottom.x()), self.height())
+                elif line['type'] == 'H':
+                    p_left = self.image_to_screen(QPointF(0, pos_img))
+                    p_right = self.image_to_screen(QPointF(self.pixmap.width(), pos_img))
+                    painter.drawLine(0, int(p_left.y()), self.width(), int(p_right.y()))
+                    
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setClipping(False)
 
     def draw_overlays(self, painter):
