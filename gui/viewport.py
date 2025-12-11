@@ -173,8 +173,8 @@ class ZetaViewport(QFrame):
             pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
             
             # Axial線を追加
-            if sender_vp.view_plane == 'Axial':
-                new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")}) # 緑 (Axial用)
+            #if sender_vp.view_plane == 'Axial':
+            #    new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")}) # 緑 (Axial用)
             
             # 互いの線 (Sagittal <-> Coronal)
             if self.view_plane == 'Coronal' and sender_vp.view_plane == 'Sagittal':
