@@ -198,11 +198,7 @@ class ZetaViewer(QMainWindow):
             if vp == sender:
                 pass
             else:
-                target_angle = angle
-                if vp.view_plane == 'Sagittal':
-                    target_angle = angle + 90
-                
-                vp.rotation_angle = target_angle
+                vp.rotation_angle = angle              
                 vp.update_display(emit_position=False)
         
         # 最後に線を全体更新

@@ -68,6 +68,8 @@ class ZetaViewport(QFrame):
         self.is_rotating_line = False
         self.drag_angle_offset = 0.0
 
+        self.is_grabbing_sagittal = False
+
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
@@ -567,23 +569,43 @@ class ZetaViewport(QFrame):
         if event.button() == Qt.MouseButton.RightButton: self.is_right_dragged = False
         
         if event.button() == Qt.MouseButton.LeftButton:
-            # 1. 先にヒットテストを行う (線があれば回転モードへ)
             if self.view_plane == 'Axial' and self.current_tool_mode == 0:
                 canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
-                hit_type, _ = self.canvas.hit_test(canvas_pos)
+                hit_type, hit_index = self.canvas.hit_test(canvas_pos)
                 
                 if hit_type == 'cross_ref':
                     self.is_rotating_line = True
-                    # 角度オフセット計算
+                    
+                    # 1. 掴んだ線を取得
+                    line = self.canvas.cross_ref_lines[hit_index]
+                    
+                    # 2. その線の現在の角度を計算 (start -> end のベクトルから)
+                    # これにより、現在表示されている線の角度を正確に取得できる
+                    p1 = line['start']
+                    p2 = line['end']
+                    line_dx = p2.x() - p1.x()
+                    line_dy = p2.y() - p1.y() # Y軸は画面下方向が正
+                    current_line_angle = np.degrees(np.arctan2(line_dy, line_dx))
+                    
+                    # 3. マウスの角度を計算
                     rect = self.rect()
                     center = rect.center()
                     dx = event.position().x() - center.x()
                     dy = event.position().y() - center.y()
                     mouse_angle = np.degrees(np.arctan2(dy, dx))
-                    self.drag_angle_offset = self.rotation_angle - mouse_angle
-                    return # 回転操作に入ったので、座標通知（パンニング）は行わずに終了
-            
-            # 2. 線をつかまなかった場合のみ、座標変更（ナビゲーション）を行う
+                    
+                    # 4. オフセット計算 (掴んだ場所と線の角度ズレ)
+                    self.drag_angle_offset = current_line_angle - mouse_angle
+                    
+                    # 5. 色で「Sagittal線（赤）」かどうか判定
+                    # 赤(#FF0000)なら Sagittal線。これは本来の角度(Coronal)より+90度進んでいる
+                    self.is_grabbing_sagittal = False
+                    color = line.get('color', QColor("#FFFF00"))
+                    if color.name() == "#ff0000": # 赤色
+                        self.is_grabbing_sagittal = True
+                        
+                    return 
+
             self.notify_position_change()
 
         buttons = event.buttons()
@@ -601,11 +623,9 @@ class ZetaViewport(QFrame):
                     self.canvas.current_mode = 'ruler' if self.current_tool_mode == 1 else 'roi'; self.canvas.update()
 
     def mouseMoveEvent(self, event):
-        # ボタンを押してなくても座標更新
         current_pos = event.position()
-        if self.is_probe_mode:
-            self.canvas.update_probe_pos(current_pos)
-
+        if self.is_probe_mode: self.canvas.update_probe_pos(current_pos)
+        
         if self.view_plane == 'Axial' and self.current_tool_mode == 0 and not (event.buttons() & Qt.MouseButton.LeftButton):
              canvas_pos = self.canvas.mapFrom(self, current_pos.toPoint())
              hit_type, _ = self.canvas.hit_test(canvas_pos)
@@ -618,6 +638,7 @@ class ZetaViewport(QFrame):
             self.last_mouse_pos = current_pos
             return
 
+        # ★修正: 回転ロジック
         if self.is_rotating_line:
              rect = self.rect()
              center = rect.center()
@@ -625,9 +646,19 @@ class ZetaViewport(QFrame):
              dy = current_pos.y() - center.y()
              
              mouse_angle = np.degrees(np.arctan2(dy, dx))
-             new_angle = mouse_angle + self.drag_angle_offset
              
-             self.rotation_changed.emit(self, new_angle)
+             # 1. 線の「新しい角度」を計算
+             new_line_angle = mouse_angle + self.drag_angle_offset
+             
+             # 2. メインウィンドウに送る「基準角度（Coronal）」に変換
+             base_angle = new_line_angle
+             
+             if self.is_grabbing_sagittal:
+                 # Sagittal線を掴んでいる場合、その線は Coronal + 90度 の位置にある
+                 # なので、基準角度に戻すには 90度引く
+                 base_angle = new_line_angle - 90.0
+             
+             self.rotation_changed.emit(self, base_angle)
              self.last_mouse_pos = current_pos
              return
 
