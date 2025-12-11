@@ -32,6 +32,8 @@ class ZetaViewport(QFrame):
         self.is_mpr_enabled = False 
         self.volume_data = None
         self.rotation_angle = 0.0
+        self.pitch_angle = 0.0  
+        self.roll_angle = 0.0
         self.view_plane = 'Axial'
         self.current_slices = []
         self.current_file_paths = []
@@ -144,10 +146,8 @@ class ZetaViewport(QFrame):
         if self.volume_data is None: return
         if sender_vp.volume_data is None: return
 
-        # 座標は相手から直接取得
         cx, cy, cz = sender_vp.get_current_coordinates()
         
-        # 画面サイズ等の取得
         if self.canvas.pixmap is None: return
         img_w = self.canvas.pixmap.width(); img_h = self.canvas.pixmap.height()
         screen_center_x = img_w / 2; screen_center_y = img_h / 2
@@ -160,54 +160,55 @@ class ZetaViewport(QFrame):
         if sp_y <= 0: sp_y = 1.0; 
         if sp_z <= 0: sp_z = 1.0
         
-        scale_x = 1.0
-        scale_y = sp_x / sp_y
-        scale_z = sp_x / sp_z
+        scale_x = 1.0; scale_y = sp_x / sp_y; scale_z = sp_x / sp_z
 
         new_lines = [] 
+        diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
+        
+        def get_rotated_line(center_x, center_y, angle_deg, color_code):
+            rad = np.radians(angle_deg)
+            dx = np.cos(rad) * diag_len
+            dy = np.sin(rad) * diag_len
+            p1 = QPointF(center_x - dx, center_y - dy)
+            p2 = QPointF(center_x + dx, center_y + dy)
+            return {'start': p1, 'end': p2, 'color': QColor(color_code)}
 
-        # ---------------------------------------------------------
-        # A. 自分が Axial の場合
-        # ---------------------------------------------------------
+        # A. AXIAL (Yaw表示)
         if self.view_plane == 'Axial':
             my_cx = screen_center_x + (cx - vol_center_x) * scale_x
             my_cy = screen_center_y + (cy - vol_center_y) * scale_y
-            angle = sender_vp.rotation_angle 
-            diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
-
-            def get_rotated_line(center_x, center_y, angle_deg, color_code):
-                rad = np.radians(angle_deg)
-                dx = np.cos(rad) * diag_len
-                dy = np.sin(rad) * diag_len
-                p1 = QPointF(center_x - dx, center_y - dy)
-                p2 = QPointF(center_x + dx, center_y + dy)
-                return {'start': p1, 'end': p2, 'color': QColor(color_code)}
-
-            if sender_vp.view_plane == 'Coronal':
-                new_lines.append(get_rotated_line(my_cx, my_cy, angle, "#0000FF"))
-            elif sender_vp.view_plane == 'Sagittal':
-                new_lines.append(get_rotated_line(my_cx, my_cy, angle + 90, "#FF0000"))
+            yaw = sender_vp.rotation_angle 
             
-        # ---------------------------------------------------------
-        # B. 自分が Coronal / Sagittal の場合
-        # ---------------------------------------------------------
-        else: 
-            target_idx_x = cx if self.view_plane == 'Coronal' else cy
-            center_idx_x = vol_center_x if self.view_plane == 'Coronal' else vol_center_y
-            chk_scale_x  = scale_x if self.view_plane == 'Coronal' else scale_y
+            if sender_vp.view_plane == 'Coronal': # 青
+                new_lines.append(get_rotated_line(my_cx, my_cy, yaw, "#0000FF"))
+            elif sender_vp.view_plane == 'Sagittal': # 赤 (直交)
+                new_lines.append(get_rotated_line(my_cx, my_cy, yaw + 90, "#FF0000"))
+
+        # B. CORONAL (Roll表示)
+        elif self.view_plane == 'Coronal':
+            target_idx_x = cx; center_idx_x = vol_center_x; chk_scale_x = scale_x
+            target_idx_y = cz; center_idx_y = vol_center_z; chk_scale_y = scale_z
             pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
-            
-            target_idx_y = cz
-            center_idx_y = vol_center_z
-            chk_scale_y  = scale_z
             pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
-            
-            if sender_vp.view_plane == 'Axial':
-                new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")})         
-            if self.view_plane == 'Coronal' and sender_vp.view_plane == 'Sagittal':
-                new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#FF0000")})
-            if self.view_plane == 'Sagittal' and sender_vp.view_plane == 'Coronal':
-                new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#0000FF")})
+            roll = sender_vp.roll_angle
+
+            if sender_vp.view_plane == 'Axial': # 緑
+                new_lines.append(get_rotated_line(screen_center_x, pos_y, roll, "#00FF00"))
+            elif sender_vp.view_plane == 'Sagittal': # 赤 (直交)
+                new_lines.append(get_rotated_line(pos_x, screen_center_y, roll + 90, "#FF0000"))
+
+        # C. SAGITTAL (Pitch表示)
+        elif self.view_plane == 'Sagittal':
+            target_idx_x = cy; center_idx_x = vol_center_y; chk_scale_x = scale_y
+            target_idx_y = cz; center_idx_y = vol_center_z; chk_scale_y = scale_z
+            pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
+            pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
+            pitch = sender_vp.pitch_angle
+
+            if sender_vp.view_plane == 'Axial': # 緑
+                new_lines.append(get_rotated_line(screen_center_x, pos_y, pitch, "#00FF00"))
+            elif sender_vp.view_plane == 'Coronal': # 青 (直交)
+                new_lines.append(get_rotated_line(pos_x, screen_center_y, pitch + 90, "#0000FF"))
 
         self.canvas.cross_ref_lines.extend(new_lines)
         self.canvas.update()
@@ -313,106 +314,70 @@ class ZetaViewport(QFrame):
 
     # --- MPR描画 ---
     def _render_mpr(self):
-        # ボリュームが無ければ何もしない
         if self.volume_data is None: return
+        vc = self.volume_data.shape
+        center_x = vc[2] // 2; center_y = vc[1] // 2; center_z = vc[0] // 2
         
-        vc = self.volume_data.shape # (Z, Y, X)
-        
-        # ボリュームの中心
-        center_x = vc[2] // 2
-        center_y = vc[1] // 2
-        center_z = vc[0] // 2
-        
-        # スクロールによる中心移動の反映
-        if self.view_plane == 'Axial':
-            center_z = self.current_index
-        elif self.view_plane == 'Coronal':
-            center_y = self.current_index
-        elif self.view_plane == 'Sagittal':
-            center_x = self.current_index
+        if self.view_plane == 'Axial': center_z = self.current_index
+        elif self.view_plane == 'Coronal': center_y = self.current_index
+        elif self.view_plane == 'Sagittal': center_x = self.current_index
 
         center_point = (center_x, center_y, center_z)
         
-        # ★修正ポイント1: ベクトル定義と回転軸の統一
-        # 重複していたコードを削除し、ここで定義します。
-        # 重要なのは axis_rot = 'z' です。どの断面でも「人体の上下方向(Z)」を軸に回転させます。
-
-        axis_rot = 'z' # 全ビューポートでZ軸回転（Swivel）を採用
-
         if self.view_plane == 'Axial':
-            # Axial: 通常のXY平面
-            vec_right  = np.array([1, 0, 0])
-            vec_down   = np.array([0, 1, 0])
-            vec_normal = np.array([0, 0, 1]) # 奥行き (Z)
+            vec_right = np.array([1, 0, 0]); vec_down = np.array([0, 1, 0]); vec_normal = np.array([0, 0, 1])
         elif self.view_plane == 'Coronal':
-            # Coronal: XZ平面だが、Z軸回転させるためにX軸とY軸(奥行き)を回す
-            vec_right  = np.array([1, 0, 0])
-            vec_down   = np.array([0, 0, -1]) # Z軸(下)は固定
-            vec_normal = np.array([0, 1, 0])  # Y軸(奥行き)
+            vec_right = np.array([1, 0, 0]); vec_down = np.array([0, 0, -1]); vec_normal = np.array([0, 1, 0])
         elif self.view_plane == 'Sagittal':
-            # Sagittal: YZ平面
-            vec_right  = np.array([0, 1, 0])
-            vec_down   = np.array([0, 0, -1]) # Z軸(下)は固定
-            vec_normal = np.array([1, 0, 0])  # X軸(奥行き)
-
-        # ★重複コード削除: ここにあった rot_mat の計算などは削除し、tryブロック内にまとめます
+            vec_right = np.array([0, 1, 0]); vec_down = np.array([0, 0, -1]); vec_normal = np.array([1, 0, 0])
 
         try:
-            # 1. ボクセルスペーシングを取得 (Z, Y, X)
             sp_z, sp_y, sp_x = self.voxel_spacing
-            
-            # 安全策: ゼロ除算防止
-            if sp_x <= 0: sp_x = 1.0
-            if sp_y <= 0: sp_y = 1.0
+            if sp_x <= 0: sp_x = 1.0; 
+            if sp_y <= 0: sp_y = 1.0; 
             if sp_z <= 0: sp_z = 1.0
-
-            scale_x = 1.0               # X軸基準
-            scale_y = sp_x / sp_y       # Y軸の補正値
-            scale_z = sp_x / sp_z       # Z軸の補正値
-
+            scale_x = 1.0; scale_y = sp_x / sp_y; scale_z = sp_x / sp_z
             spacing_scale = np.array([scale_x, scale_y, scale_z])
 
-            # 3. 回転行列の適用
-            # axis_rot は上で 'z' に固定しました
-            rot_mat = get_rotation_matrix(axis_rot, self.rotation_angle)
-            
+            # 3D回転行列 (Yaw/Pitch/Roll)
+            c, s = np.cos(np.radians(self.rotation_angle)), np.sin(np.radians(self.rotation_angle))
+            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]) # Yaw
+
+            c, s = np.cos(np.radians(self.pitch_angle)), np.sin(np.radians(self.pitch_angle))
+            Rx = np.array([[1, 0, 0], [0, c, -s], [0, s, c]]) # Pitch
+
+            c, s = np.cos(np.radians(self.roll_angle)), np.sin(np.radians(self.roll_angle))
+            Ry = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]) # Roll
+
+            # 自分自身の軸回転を除外して合成
+            if self.view_plane == 'Axial': rot_mat = Ry @ Rx      # Yaw無視
+            elif self.view_plane == 'Coronal': rot_mat = Rz @ Rx  # Roll無視
+            elif self.view_plane == 'Sagittal': rot_mat = Rz @ Ry # Pitch無視
+            else: rot_mat = Rz @ Ry @ Rx
+
             vec_right_rot  = rot_mat @ vec_right
             vec_down_rot   = rot_mat @ vec_down
             vec_normal_rot = rot_mat @ vec_normal
             
-            # 4. 物理サイズに基づくスケーリングを適用
             vec_right_final  = vec_right_rot  * spacing_scale
             vec_down_final   = vec_down_rot   * spacing_scale
             vec_normal_final = vec_normal_rot * spacing_scale
 
-            # 表示サイズ
             dim = max(vc)
-            req_w = int(dim * 1.2)
-            req_h = int(dim * 1.2)
+            req_w = int(dim * 1.2); req_h = int(dim * 1.2)
             
-            # リサンプリング実行
             slice_img = get_resampled_slice(
-                self.volume_data,
-                center_point,
-                vec_right_final,
-                vec_down_final,
-                vec_normal_final,
-                req_w, req_h,
-                self.voxel_spacing,
-                self.slab_thickness_mm,
-                self.mip_mode
+                self.volume_data, center_point,
+                vec_right_final, vec_down_final, vec_normal_final,
+                req_w, req_h, self.voxel_spacing,
+                self.slab_thickness_mm, self.mip_mode
             )
             
-            # --- 画像生成と表示 ---
             ds = self.current_slices[0] if self.current_slices else None
             hu_image = slice_img.astype(np.float32)
-
             self._process_and_send_image(hu_image, 1.0, ds)
-            
         except Exception as e:
             print(f"MPR Render Error: {e}")
-            import traceback
-            traceback.print_exc()
 
     def _project_slab(self, slab, axis):
         if slab.shape[axis] == 0: return np.zeros((1,1), dtype=np.float32)
@@ -597,51 +562,39 @@ class ZetaViewport(QFrame):
         if event.button() == Qt.MouseButton.RightButton: self.is_right_dragged = False
         
         if event.button() == Qt.MouseButton.LeftButton:
-            # NAVモード時のみ回転操作を許可
             if self.current_tool_mode == 0:
                 canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
                 hit_type, hit_index = self.canvas.hit_test(canvas_pos)
                 
-                # 線を掴んだ場合
                 if hit_type == 'cross_ref':
-                    # ★ここで確実に line を定義します
                     line = self.canvas.cross_ref_lines[hit_index]
+                    self.is_rotating_line = True
                     
-                    # Case A: Axial画面 (プロペラ回転)
-                    if self.view_plane == 'Axial':
-                        self.is_rotating_line = True
-                        
-                        # 線の角度計算
-                        if 'start' in line and 'end' in line:
-                            p1 = line['start']; p2 = line['end']
+                    # 角度計算 (安全対策)
+                    current_line_angle = 0.0
+                    if 'start' in line and 'end' in line:
+                        p1 = line['start']; p2 = line['end']
+                        if p1 != p2:
                             current_line_angle = np.degrees(np.arctan2(p2.y() - p1.y(), p2.x() - p1.x()))
-                        else:
-                            current_line_angle = 0 # フォールバック
+                    
+                    rect = self.rect(); center = rect.center()
+                    dx = event.position().x() - center.x(); dy = event.position().y() - center.y()
+                    mouse_angle = np.degrees(np.arctan2(dy, dx))
+                    
+                    self.drag_angle_offset = current_line_angle - mouse_angle
+                    
+                    # 直交判定
+                    self.is_grabbing_orthogonal = False
+                    c_name = line.get('color', QColor("#FFFF00")).name().upper()
+                    
+                    if self.view_plane == 'Axial' and c_name == "#FF0000": self.is_grabbing_orthogonal = True
+                    elif self.view_plane == 'Coronal' and c_name == "#FF0000": self.is_grabbing_orthogonal = True
+                    elif self.view_plane == 'Sagittal' and c_name == "#0000FF": self.is_grabbing_orthogonal = True
+                    
+                    return
 
-                        # マウス角度計算
-                        rect = self.rect(); center = rect.center()
-                        dx = event.position().x() - center.x()
-                        dy = event.position().y() - center.y()
-                        mouse_angle = np.degrees(np.arctan2(dy, dx))
-                        
-                        self.drag_angle_offset = current_line_angle - mouse_angle
-                        
-                        self.is_grabbing_sagittal = False
-                        color = line.get('color', QColor("#FFFF00"))
-                        if color.name() == "#ff0000": self.is_grabbing_sagittal = True
-                        return
-
-                    # Case B: Coronal / Sagittal画面 (スイベル回転)
-                    # ★インデント注意: line が定義されたブロックの中で判定します
-                    elif line.get('type') == 'V':
-                        self.is_rotating_line = True
-                        self.swivel_start_angle = self.rotation_angle
-                        self.swivel_start_x = event.position().x()
-                        return
-
-            # 線を掴まなかった場合のみ、座標通知（パンニング準備）
             self.notify_position_change()
-
+        
         buttons = event.buttons()
         if (buttons & Qt.MouseButton.LeftButton) and (buttons & Qt.MouseButton.RightButton): return
         if self.current_tool_mode in [1, 2] and (buttons & Qt.MouseButton.LeftButton):
@@ -660,66 +613,37 @@ class ZetaViewport(QFrame):
         current_pos = event.position()
         if self.is_probe_mode: self.canvas.update_probe_pos(current_pos)
         
-        if self.view_plane == 'Axial' and self.current_tool_mode == 0 and not (event.buttons() & Qt.MouseButton.LeftButton):
+        if self.current_tool_mode == 0 and not (event.buttons() & Qt.MouseButton.LeftButton):
              canvas_pos = self.canvas.mapFrom(self, current_pos.toPoint())
              hit_type, _ = self.canvas.hit_test(canvas_pos)
-             if hit_type == 'cross_ref':
-                 self.setCursor(Qt.CursorShape.PointingHandCursor)
-             else:
-                 self.setCursor(Qt.CursorShape.ArrowCursor)
+             if hit_type == 'cross_ref': self.setCursor(Qt.CursorShape.PointingHandCursor)
+             else: self.setCursor(Qt.CursorShape.ArrowCursor)
 
-        if self.last_mouse_pos is None:
-            self.last_mouse_pos = current_pos
-            return
-
-        # ★修正: 回転ロジック
-        if self.is_rotating_line:
-             # Case A: Axial画面 (プロペラ回転)
-             if self.view_plane == 'Axial':
-                 rect = self.rect(); center = rect.center()
-                 dx = current_pos.x() - center.x()
-                 dy = current_pos.y() - center.y()
-                 mouse_angle = np.degrees(np.arctan2(dy, dx))
-                 
-                 new_line_angle = mouse_angle + self.drag_angle_offset
-                 base_angle = new_line_angle
-                 if self.is_grabbing_sagittal: base_angle = new_line_angle - 90.0
-                 
-                 self.rotation_changed.emit(self, base_angle)
-             
-             # Case B: ★追加 Coronal / Sagittal画面 (スイベル回転)
-             else:
-                 # 横移動量 (pixels)
-                 diff_x = current_pos.x() - self.swivel_start_x
-                 
-                 sensitivity = 0.5
-                 
-                 new_angle = self.swivel_start_angle + (diff_x * sensitivity)
-                 
-                 self.rotation_changed.emit(self, new_angle)
-
-             self.last_mouse_pos = current_pos
-             return
+        if self.last_mouse_pos is None: self.last_mouse_pos = current_pos; return
 
         delta_x = float(current_pos.x() - self.last_mouse_pos.x())
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
         buttons = event.buttons()
-        modifiers = event.modifiers()
 
-        if (buttons & Qt.MouseButton.LeftButton) and (modifiers & Qt.KeyboardModifier.AltModifier):
-             # 画面中心からの角度を計算
-             rect = self.rect()
-             center = rect.center()
+        if self.is_rotating_line:
+             rect = self.rect(); center = rect.center()
+             dx = current_pos.x() - center.x(); dy = current_pos.y() - center.y()
+             mouse_angle = np.degrees(np.arctan2(dy, dx))
              
-             # 現在のマウス位置と中心との差分
-             dx = current_pos.x() - center.x()
-             dy = current_pos.y() - center.y()
+             new_visual_angle = mouse_angle + self.drag_angle_offset
              
-             angle_rad = np.arctan2(dy, dx)
-             angle_deg = np.degrees(angle_rad)
-             
-             self.rotation_changed.emit(self, angle_deg)
-             
+             base_angle = new_visual_angle
+             if self.is_grabbing_orthogonal: base_angle -= 90.0
+
+             if self.view_plane == 'Axial':
+                 self.rotation_changed.emit(self, base_angle) # Yaw
+             elif self.view_plane == 'Coronal':
+                 self.roll_angle = base_angle
+                 self.rotation_changed.emit(self, self.rotation_angle) # Roll
+             elif self.view_plane == 'Sagittal':
+                 self.pitch_angle = base_angle
+                 self.rotation_changed.emit(self, self.rotation_angle) # Pitch
+
              self.last_mouse_pos = current_pos
              return
 

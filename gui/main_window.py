@@ -194,14 +194,24 @@ class ZetaViewer(QMainWindow):
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
     def on_viewport_rotated(self, sender, angle):
+        # 1. 送信元(sender)が持っている「3つの角度」をすべて取得
+        # (viewport.py で計算された最新の値です)
+        new_yaw   = sender.rotation_angle
+        new_pitch = sender.pitch_angle
+        new_roll  = sender.roll_angle
+        
+        # 2. 全ビューポートに3つの角度をコピーして同期させる
         for vp in self.viewports:
-            if vp == sender:
-                pass
-            else:
-                vp.rotation_angle = angle              
+            # 自分自身(sender)も含めて値をセットすることで、全画面の状態を完全一致させます
+            vp.rotation_angle = new_yaw
+            vp.pitch_angle    = new_pitch
+            vp.roll_angle     = new_roll
+            
+            # 自分以外は再描画を行う
+            if vp != sender:
                 vp.update_display(emit_position=False)
         
-        # 最後に線を全体更新
+        # 3. 最後にリファレンス線（十字線）を一括更新
         self.update_all_cross_refs()
 
     def update_all_cross_refs(self):
