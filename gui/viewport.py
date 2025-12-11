@@ -636,6 +636,7 @@ class ZetaViewport(QFrame):
              if self.is_grabbing_orthogonal: base_angle -= 90.0
 
              if self.view_plane == 'Axial':
+                 self.rotation_angle = base_angle
                  self.rotation_changed.emit(self, base_angle) # Yaw
              elif self.view_plane == 'Coronal':
                  self.roll_angle = base_angle
