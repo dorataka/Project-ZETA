@@ -335,7 +335,7 @@ class ImageCanvas(QWidget):
                 closest_item = i
                 item_type = 'ruler'
         
-        # B. ★追加: クロスリファレンス線のチェック
+        # B. クロスリファレンス線のチェック
         if self.cross_ref_lines:
             for i, line in enumerate(self.cross_ref_lines):
                 # start/end を持つ（斜め線）場合のみ判定
@@ -343,9 +343,22 @@ class ImageCanvas(QWidget):
                     p1 = self.image_to_screen(line['start'])
                     p2 = self.image_to_screen(line['end'])
                     dist = distance_point_to_segment(target_point, p1, p2)
+
+                # ★追加: 垂直線 (Coronal/Sagittal画面)
+                elif line.get('type') == 'V' and 'pos' in line:
+                    # 垂直線との距離 = X座標の差の絶対値
+                    # 線は画像上のX座標(pos)にあるので、スクリーン座標に変換して判定
+                    line_x_screen = self.image_to_screen(QPointF(line['pos'], 0)).x()
+                    dist = abs(target_point.x() - line_x_screen)
+                
+                # ★追加: 水平線 (Coronal/Sagittal画面)
+                elif line.get('type') == 'H' and 'pos' in line:
+                    # 水平線との距離 = Y座標の差の絶対値
+                    line_y_screen = self.image_to_screen(QPointF(0, line['pos'])).y()
+                    dist = abs(target_point.y() - line_y_screen)
                     
-                    # 定規よりも近ければこちらを優先（または同じ距離なら上書き）
-                    if dist < 8.0 and dist < min_dist:
+                # 定規よりも近ければこちらを優先（または同じ距離なら上書き）
+                if dist < 8.0 and dist < min_dist:
                         min_dist = dist
                         closest_item = i
                         item_type = 'cross_ref'

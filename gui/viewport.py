@@ -67,8 +67,9 @@ class ZetaViewport(QFrame):
 
         self.is_rotating_line = False
         self.drag_angle_offset = 0.0
-
         self.is_grabbing_sagittal = False
+        self.swivel_start_angle = 0.0
+        self.swivel_start_x = 0
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -119,6 +120,7 @@ class ZetaViewport(QFrame):
     # ★追加3: 指定したビューポート(sender_vp)に対応する線を追加する
     def add_cross_ref_line(self, sender_vp):
         if self.volume_data is None: return
+        if sender_vp.volume_data is None: return
 
         # 座標は相手から直接取得
         cx, cy, cz = sender_vp.get_current_coordinates()
@@ -140,8 +142,11 @@ class ZetaViewport(QFrame):
         scale_y = sp_x / sp_y
         scale_z = sp_x / sp_z
 
-        new_lines = [] # 追加する線リスト
+        new_lines = [] 
 
+        # ---------------------------------------------------------
+        # A. 自分が Axial の場合
+        # ---------------------------------------------------------
         if self.view_plane == 'Axial':
             my_cx = screen_center_x + (cx - vol_center_x) * scale_x
             my_cy = screen_center_y + (cy - vol_center_y) * scale_y
@@ -161,7 +166,10 @@ class ZetaViewport(QFrame):
             elif sender_vp.view_plane == 'Sagittal':
                 new_lines.append(get_rotated_line(my_cx, my_cy, angle + 90, "#FF0000"))
             
-        else: # Coronal / Sagittal
+        # ---------------------------------------------------------
+        # B. 自分が Coronal / Sagittal の場合
+        # ---------------------------------------------------------
+        else: 
             target_idx_x = cx if self.view_plane == 'Coronal' else cy
             center_idx_x = vol_center_x if self.view_plane == 'Coronal' else vol_center_y
             chk_scale_x  = scale_x if self.view_plane == 'Coronal' else scale_y
@@ -172,17 +180,13 @@ class ZetaViewport(QFrame):
             chk_scale_y  = scale_z
             pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
             
-            # Axial線を追加
-            #if sender_vp.view_plane == 'Axial':
-            #    new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")}) # 緑 (Axial用)
-            
-            # 互いの線 (Sagittal <-> Coronal)
+            if sender_vp.view_plane == 'Axial':
+                new_lines.append({'type': 'H', 'pos': pos_y, 'color': QColor("#00FF00")})         
             if self.view_plane == 'Coronal' and sender_vp.view_plane == 'Sagittal':
                 new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#FF0000")})
             if self.view_plane == 'Sagittal' and sender_vp.view_plane == 'Coronal':
                 new_lines.append({'type': 'V', 'pos': pos_x, 'color': QColor("#0000FF")})
 
-        # リストに追加（上書きしない）
         self.canvas.cross_ref_lines.extend(new_lines)
         self.canvas.update()
 
@@ -569,43 +573,49 @@ class ZetaViewport(QFrame):
         if event.button() == Qt.MouseButton.RightButton: self.is_right_dragged = False
         
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.view_plane == 'Axial' and self.current_tool_mode == 0:
+            # NAVモード時のみ回転操作を許可
+            if self.current_tool_mode == 0:
                 canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
                 hit_type, hit_index = self.canvas.hit_test(canvas_pos)
                 
+                # 線を掴んだ場合
                 if hit_type == 'cross_ref':
-                    self.is_rotating_line = True
-                    
-                    # 1. 掴んだ線を取得
+                    # ★ここで確実に line を定義します
                     line = self.canvas.cross_ref_lines[hit_index]
                     
-                    # 2. その線の現在の角度を計算 (start -> end のベクトルから)
-                    # これにより、現在表示されている線の角度を正確に取得できる
-                    p1 = line['start']
-                    p2 = line['end']
-                    line_dx = p2.x() - p1.x()
-                    line_dy = p2.y() - p1.y() # Y軸は画面下方向が正
-                    current_line_angle = np.degrees(np.arctan2(line_dy, line_dx))
-                    
-                    # 3. マウスの角度を計算
-                    rect = self.rect()
-                    center = rect.center()
-                    dx = event.position().x() - center.x()
-                    dy = event.position().y() - center.y()
-                    mouse_angle = np.degrees(np.arctan2(dy, dx))
-                    
-                    # 4. オフセット計算 (掴んだ場所と線の角度ズレ)
-                    self.drag_angle_offset = current_line_angle - mouse_angle
-                    
-                    # 5. 色で「Sagittal線（赤）」かどうか判定
-                    # 赤(#FF0000)なら Sagittal線。これは本来の角度(Coronal)より+90度進んでいる
-                    self.is_grabbing_sagittal = False
-                    color = line.get('color', QColor("#FFFF00"))
-                    if color.name() == "#ff0000": # 赤色
-                        self.is_grabbing_sagittal = True
+                    # Case A: Axial画面 (プロペラ回転)
+                    if self.view_plane == 'Axial':
+                        self.is_rotating_line = True
                         
-                    return 
+                        # 線の角度計算
+                        if 'start' in line and 'end' in line:
+                            p1 = line['start']; p2 = line['end']
+                            current_line_angle = np.degrees(np.arctan2(p2.y() - p1.y(), p2.x() - p1.x()))
+                        else:
+                            current_line_angle = 0 # フォールバック
 
+                        # マウス角度計算
+                        rect = self.rect(); center = rect.center()
+                        dx = event.position().x() - center.x()
+                        dy = event.position().y() - center.y()
+                        mouse_angle = np.degrees(np.arctan2(dy, dx))
+                        
+                        self.drag_angle_offset = current_line_angle - mouse_angle
+                        
+                        self.is_grabbing_sagittal = False
+                        color = line.get('color', QColor("#FFFF00"))
+                        if color.name() == "#ff0000": self.is_grabbing_sagittal = True
+                        return
+
+                    # Case B: Coronal / Sagittal画面 (スイベル回転)
+                    # ★インデント注意: line が定義されたブロックの中で判定します
+                    elif line.get('type') == 'V':
+                        self.is_rotating_line = True
+                        self.swivel_start_angle = self.rotation_angle
+                        self.swivel_start_x = event.position().x()
+                        return
+
+            # 線を掴まなかった場合のみ、座標通知（パンニング準備）
             self.notify_position_change()
 
         buttons = event.buttons()
@@ -640,25 +650,30 @@ class ZetaViewport(QFrame):
 
         # ★修正: 回転ロジック
         if self.is_rotating_line:
-             rect = self.rect()
-             center = rect.center()
-             dx = current_pos.x() - center.x()
-             dy = current_pos.y() - center.y()
+             # Case A: Axial画面 (プロペラ回転)
+             if self.view_plane == 'Axial':
+                 rect = self.rect(); center = rect.center()
+                 dx = current_pos.x() - center.x()
+                 dy = current_pos.y() - center.y()
+                 mouse_angle = np.degrees(np.arctan2(dy, dx))
+                 
+                 new_line_angle = mouse_angle + self.drag_angle_offset
+                 base_angle = new_line_angle
+                 if self.is_grabbing_sagittal: base_angle = new_line_angle - 90.0
+                 
+                 self.rotation_changed.emit(self, base_angle)
              
-             mouse_angle = np.degrees(np.arctan2(dy, dx))
-             
-             # 1. 線の「新しい角度」を計算
-             new_line_angle = mouse_angle + self.drag_angle_offset
-             
-             # 2. メインウィンドウに送る「基準角度（Coronal）」に変換
-             base_angle = new_line_angle
-             
-             if self.is_grabbing_sagittal:
-                 # Sagittal線を掴んでいる場合、その線は Coronal + 90度 の位置にある
-                 # なので、基準角度に戻すには 90度引く
-                 base_angle = new_line_angle - 90.0
-             
-             self.rotation_changed.emit(self, base_angle)
+             # Case B: ★追加 Coronal / Sagittal画面 (スイベル回転)
+             else:
+                 # 横移動量 (pixels)
+                 diff_x = current_pos.x() - self.swivel_start_x
+                 
+                 sensitivity = 0.5
+                 
+                 new_angle = self.swivel_start_angle + (diff_x * sensitivity)
+                 
+                 self.rotation_changed.emit(self, new_angle)
+
              self.last_mouse_pos = current_pos
              return
 
