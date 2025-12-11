@@ -27,60 +27,82 @@ class ZetaViewport(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.Box)
-        self.setLineWidth(2)
-        self.setAcceptDrops(True)
-        self.set_active(False)
         
-        # マウス移動を常に追跡 (プローブ用)
-        self.setMouseTracking(True)
-
+        # 1. まず変数を初期化する (これを先に持ってくる)
+        self.is_mpr_enabled = False 
+        self.volume_data = None
+        self.rotation_angle = 0.0
+        self.view_plane = 'Axial'
         self.current_slices = []
         self.current_file_paths = []
-        self.volume_data = None
         self.voxel_spacing = (1.0, 1.0, 1.0)
         self.mpr_loaded = False
-        
         self.current_index = 0
-        self.view_plane = 'Axial'
-        self.is_mpr_enabled = False 
-
-        self.rotation_angle = 0
-        
         self.mip_mode = 'AVG'
         self.slab_thickness_mm = 0.0 
-        
         self.is_probe_mode = False
-
         self.window_level = 40
         self.window_width = 400
         self.current_tool_mode = 0 
         self._img_buffer = None
         self._cached_wl = 40
         self._cached_ww = 400
-        
         self.load_worker = None
         self.mpr_worker = None
         self.last_mouse_pos = None
         self.drag_accumulator = 0
         self.is_right_dragged = False
-
+        
         self.is_rotating_line = False
         self.drag_angle_offset = 0.0
         self.is_grabbing_sagittal = False
         self.swivel_start_angle = 0.0
         self.swivel_start_x = 0
 
+        # 2. UI設定を行う
+        self.setFrameShape(QFrame.Shape.Box)
+        self.setLineWidth(2)
+        self.setAcceptDrops(True)
+        self.setMouseTracking(True)
+        
+        # 3. レイアウトとキャンバスの準備
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
         self.canvas = ImageCanvas()
         self.layout.addWidget(self.canvas)
+        
+        # 4. 最後に set_active を呼ぶ (これで update_border が動いても大丈夫)
+        self.set_active(False)
 
     def set_active(self, active: bool):
         self.is_active = active
-        if active: self.setStyleSheet("border: 2px solid #00FF00;") 
-        else: self.setStyleSheet("border: 1px solid #333333;")
+        self.update_border()
+
+    def update_border(self):
+        # デフォルト (非アクティブ・2D)
+        color = "#333333"
+        width = "1px"
+
+        # MPRモードかつデータがある場合
+        if self.is_mpr_enabled and self.volume_data is not None:
+            # 線の色に合わせる
+            if self.view_plane == 'Axial':
+                color = "#00FF00" # 緑
+            elif self.view_plane == 'Coronal':
+                color = "#0000FF" # 青
+            elif self.view_plane == 'Sagittal':
+                color = "#FF0000" # 赤
+            
+            # アクティブな時は少し太く、非アクティブでも色は残す
+            width = "3px" if self.is_active else "2px"
+            
+        # 通常の2Dモードの場合
+        elif self.is_active:
+            color = "#00FF00"
+            width = "2px"
+
+        self.setStyleSheet(f"border: {width} solid {color};")
 
     # --- プローブモード切替 ---
     def set_probe_mode(self, active):
@@ -484,6 +506,7 @@ class ZetaViewport(QFrame):
         self.set_view_plane('Axial')
         self.window_level = self._cached_wl; self.window_width = self._cached_ww
         self.update_display(emit_position=True)
+        self.update_border()
 
     def set_view_plane(self, plane):
         if not self.is_mpr_enabled: return
@@ -491,6 +514,7 @@ class ZetaViewport(QFrame):
         max_idx = self.get_max_index()
         self.current_index = max_idx // 2
         self.canvas.reset_view(); self.update_display()
+        self.update_border()
 
     def load_series(self, file_paths):
         self.current_file_paths = file_paths; self.mpr_loaded = False; self.volume_data = None; self.is_mpr_enabled = False 
