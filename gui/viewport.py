@@ -324,6 +324,7 @@ class ZetaViewport(QFrame):
 
         center_point = (center_x, center_y, center_z)
         
+        # 基本ベクトル定義
         if self.view_plane == 'Axial':
             vec_right = np.array([1, 0, 0]); vec_down = np.array([0, 1, 0]); vec_normal = np.array([0, 0, 1])
         elif self.view_plane == 'Coronal':
@@ -349,11 +350,15 @@ class ZetaViewport(QFrame):
             c, s = np.cos(np.radians(self.roll_angle)), np.sin(np.radians(self.roll_angle))
             Ry = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]) # Roll
 
-            # 自分自身の軸回転を除外して合成
-            if self.view_plane == 'Axial': rot_mat = Ry @ Rx      # Yaw無視
-            elif self.view_plane == 'Coronal': rot_mat = Rz @ Rx  # Roll無視
-            elif self.view_plane == 'Sagittal': rot_mat = Rz @ Ry # Pitch無視
-            else: rot_mat = Rz @ Ry @ Rx
+            # ★復元箇所: 必要な回転成分を含める
+            if self.view_plane == 'Axial': 
+                rot_mat = Ry @ Rx      # Yaw無視 (自分は回らない)
+            elif self.view_plane == 'Coronal': 
+                rot_mat = Rz @ Rx      # Roll無視 (自分は回らない) + Yaw(Z)は受ける
+            elif self.view_plane == 'Sagittal': 
+                rot_mat = Rz @ Ry      # Pitch無視 (自分は回らない) + Yaw(Z)は受ける
+            else: 
+                rot_mat = Rz @ Ry @ Rx
 
             vec_right_rot  = rot_mat @ vec_right
             vec_down_rot   = rot_mat @ vec_down
@@ -446,8 +451,24 @@ class ZetaViewport(QFrame):
     def toggle_mpr(self, enabled):
         if self.is_mpr_enabled == enabled: return
         self.is_mpr_enabled = enabled
+        
         if enabled:
+            # MPRをONにする時
             self._cached_wl = self.window_level; self._cached_ww = self.window_width
+            
+            # ------------------------------------------------------------------
+            # ★追加: 以前の状態（回転・ズーム等）をリセットしてデフォルトに戻す
+            # ------------------------------------------------------------------
+            self.rotation_angle = 0.0
+            self.pitch_angle = 0.0
+            self.roll_angle = 0.0
+            self.canvas.reset_view() # パン・ズームのリセット
+            
+            # スライス位置を中心にリセット
+            if self.volume_data is not None:
+                self.current_index = self.volume_data.shape[0] // 2
+
+            # データ構築または表示切替
             if not self.mpr_loaded and self.current_file_paths:
                 self.processing_start.emit("Building 3D MPR...")
                 self.mpr_worker = MprBuilderWorker(self.current_file_paths)
@@ -458,10 +479,19 @@ class ZetaViewport(QFrame):
                 self.set_view_plane('Axial')
                 self.window_level = self._cached_wl; self.window_width = self._cached_ww
                 self.update_display(emit_position=True)
+                self.update_border()
         else:
+            # MPRをOFFにする時
             self.view_plane = 'Axial'
             self.current_index = min(self.current_index, len(self.current_slices)-1)
+            
+            # ★ここでも念のため内部変数をリセットしておく
+            self.rotation_angle = 0.0
+            self.pitch_angle = 0.0
+            self.roll_angle = 0.0
+            
             self.update_display(emit_position=False)
+            self.update_border()
 
     def on_mpr_finished(self, volume, spacing):
         self.processing_finish.emit() 
@@ -553,6 +583,29 @@ class ZetaViewport(QFrame):
         if ds:
             dialog = DicomTagWindow(ds, self)
             dialog.exec()
+    
+    def get_rotation_pivot(self):
+        if self.volume_data is None: return self.rect().center()
+        
+        # 現在の3D中心座標を取得
+        # (Orthogonal Lockにより、全画面で共有している一点)
+        vc = self.volume_data.shape
+        cx, cy, cz = self.get_current_coordinates()
+        
+        # 画面に応じた2D画像座標に変換
+        # (canvas.image_to_screen は Pan/Zoom を考慮してくれます)
+        img_x, img_y = 0, 0
+        
+        if self.view_plane == 'Axial':
+            img_x, img_y = cx, cy
+        elif self.view_plane == 'Coronal':
+            img_x, img_y = cx, cz
+        elif self.view_plane == 'Sagittal':
+            img_x, img_y = cy, cz
+            
+        # 画像座標 -> スクリーン座標変換
+        pivot = self.canvas.image_to_screen(QPointF(img_x, img_y))
+        return pivot
 
     # --- イベントハンドラ ---
     def mousePressEvent(self, event):
@@ -570,15 +623,20 @@ class ZetaViewport(QFrame):
                     line = self.canvas.cross_ref_lines[hit_index]
                     self.is_rotating_line = True
                     
-                    # 角度計算 (安全対策)
+                    # 1. 線の角度計算 (安全対策)
                     current_line_angle = 0.0
                     if 'start' in line and 'end' in line:
                         p1 = line['start']; p2 = line['end']
                         if p1 != p2:
                             current_line_angle = np.degrees(np.arctan2(p2.y() - p1.y(), p2.x() - p1.x()))
                     
-                    rect = self.rect(); center = rect.center()
-                    dx = event.position().x() - center.x(); dy = event.position().y() - center.y()
+                    # 2. マウス角度計算
+                    # × 修正前: center = self.rect().center()
+                    # ○ 修正後: 交点を中心にする
+                    center = self.get_rotation_pivot()
+                    
+                    dx = event.position().x() - center.x()
+                    dy = event.position().y() - center.y()
                     mouse_angle = np.degrees(np.arctan2(dy, dx))
                     
                     self.drag_angle_offset = current_line_angle - mouse_angle
@@ -626,8 +684,12 @@ class ZetaViewport(QFrame):
         buttons = event.buttons()
 
         if self.is_rotating_line:
-             rect = self.rect(); center = rect.center()
-             dx = current_pos.x() - center.x(); dy = current_pos.y() - center.y()
+             # × 修正前: center = self.rect().center()
+             # ○ 修正後: 交点を中心にする
+             center = self.get_rotation_pivot()
+             
+             dx = current_pos.x() - center.x()
+             dy = current_pos.y() - center.y()
              mouse_angle = np.degrees(np.arctan2(dy, dx))
              
              new_visual_angle = mouse_angle + self.drag_angle_offset
