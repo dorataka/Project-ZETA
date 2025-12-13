@@ -23,6 +23,7 @@ class ImageCanvas(QWidget):
         self.pan_x = 0
         self.pan_y = 0
         self.zoom_factor = 1.0
+        self.cross_center_pos = None
         
         self.measurements = []
         self.rois = []
@@ -306,7 +307,21 @@ class ImageCanvas(QWidget):
         if isinstance(screen_pos, QPoint): target_point = QPointF(screen_pos)
         else: target_point = screen_pos
         
-        # 1. ROIの判定
+        # 1. 交点（センター）の判定
+        # add_cross_ref_line で計算済みの正しい位置を使う
+        if getattr(self, 'cross_center_pos', None) is not None:
+            # 画像座標(cross_center_pos) -> スクリーン座標
+            center_screen = self.image_to_screen(self.cross_center_pos)
+            
+            dx = target_point.x() - center_screen.x()
+            dy = target_point.y() - center_screen.y()
+            dist = (dx**2 + dy**2)**0.5
+            
+            # 半径20px以内ならヒット
+            if dist < 20.0:
+                return ('cross_center', 0)
+
+        # 2. ROIの判定 (既存のまま)
         for i, roi in enumerate(self.rois):
             if roi.get('slice_index', -1) != self.current_slice_index: continue
             rect_img = roi['rect']
@@ -319,49 +334,35 @@ class ImageCanvas(QWidget):
                 normalized_dist = ((target_point.x() - cx) / rx)**2 + ((target_point.y() - cy) / ry)**2
                 if normalized_dist <= 1.2: return ('roi', i)
 
-        # 2. 線（定規 または リファレンス線）の判定
+        # 3. 線の判定 (既存のまま)
         min_dist = float('inf')
         closest_item = None
         item_type = None
 
-        # A. 計測定規 (Ruler) のチェック
+        # Ruler
         for i, m in enumerate(self.measurements):
             if m.get('slice_index', -1) != self.current_slice_index: continue
-            p1 = self.image_to_screen(m['start'])
-            p2 = self.image_to_screen(m['end'])
+            p1 = self.image_to_screen(m['start']); p2 = self.image_to_screen(m['end'])
             dist = distance_point_to_segment(target_point, p1, p2)
             if dist < 8.0 and dist < min_dist:
-                min_dist = dist
-                closest_item = i
-                item_type = 'ruler'
+                min_dist = dist; closest_item = i; item_type = 'ruler'
         
-        # B. クロスリファレンス線のチェック
+        # CrossRef
         if self.cross_ref_lines:
             for i, line in enumerate(self.cross_ref_lines):
-                # start/end を持つ（斜め線）場合のみ判定
+                dist = float('inf')
                 if 'start' in line and 'end' in line:
-                    p1 = self.image_to_screen(line['start'])
-                    p2 = self.image_to_screen(line['end'])
+                    p1 = self.image_to_screen(line['start']); p2 = self.image_to_screen(line['end'])
                     dist = distance_point_to_segment(target_point, p1, p2)
-
-                # ★追加: 垂直線 (Coronal/Sagittal画面)
                 elif line.get('type') == 'V' and 'pos' in line:
-                    # 垂直線との距離 = X座標の差の絶対値
-                    # 線は画像上のX座標(pos)にあるので、スクリーン座標に変換して判定
                     line_x_screen = self.image_to_screen(QPointF(line['pos'], 0)).x()
                     dist = abs(target_point.x() - line_x_screen)
-                
-                # ★追加: 水平線 (Coronal/Sagittal画面)
                 elif line.get('type') == 'H' and 'pos' in line:
-                    # 水平線との距離 = Y座標の差の絶対値
                     line_y_screen = self.image_to_screen(QPointF(0, line['pos'])).y()
                     dist = abs(target_point.y() - line_y_screen)
-                    
-                # 定規よりも近ければこちらを優先（または同じ距離なら上書き）
-                if dist < 8.0 and dist < min_dist:
-                        min_dist = dist
-                        closest_item = i
-                        item_type = 'cross_ref'
+
+                if dist < 12.0 and dist < min_dist:
+                    min_dist = dist; closest_item = i; item_type = 'cross_ref'
 
         if closest_item is not None: return (item_type, closest_item)
         return (None, None)

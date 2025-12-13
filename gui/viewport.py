@@ -25,6 +25,8 @@ class ZetaViewport(QFrame):
 
     rotation_changed = pyqtSignal(object, float)
 
+    request_center_move = pyqtSignal(float, float, float) 
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -60,6 +62,10 @@ class ZetaViewport(QFrame):
         self.is_grabbing_sagittal = False
         self.swivel_start_angle = 0.0
         self.swivel_start_x = 0
+
+        self.is_moving_center = False
+        self.center_drag_start_pos = None
+        self.center_drag_start_coords = None
 
         # 2. UI設定を行う
         self.setFrameShape(QFrame.Shape.Box)
@@ -146,71 +152,92 @@ class ZetaViewport(QFrame):
         if self.volume_data is None: return
         if sender_vp.volume_data is None: return
 
-        cx, cy, cz = sender_vp.get_current_coordinates()
-        
         if self.canvas.pixmap is None: return
-        img_w = self.canvas.pixmap.width(); img_h = self.canvas.pixmap.height()
-        screen_center_x = img_w / 2; screen_center_y = img_h / 2
+        img_w = self.canvas.pixmap.width()
+        img_h = self.canvas.pixmap.height()
         
-        vc = self.volume_data.shape
-        vol_center_x = vc[2] // 2; vol_center_y = vc[1] // 2; vol_center_z = vc[0] // 2
+        screen_center_x = img_w / 2.0
+        screen_center_y = img_h / 2.0
+
+        # ★重要: ループの最初（線リストが空）なら、まずは中心で初期化する
+        if not self.canvas.cross_ref_lines:
+            self.canvas.cross_center_pos = QPointF(screen_center_x, screen_center_y)
+
+        # 現在の値をロード（片方の軸だけ更新するため）
+        current_pos = self.canvas.cross_center_pos
+        new_x = current_pos.x()
+        new_y = current_pos.y()
+
+        # 座標計算
+        target_cx, target_cy, target_cz = sender_vp.get_current_coordinates()
+        my_cx, my_cy, my_cz = self.get_current_coordinates()
         
         sp_z, sp_y, sp_x = self.voxel_spacing
         if sp_x <= 0: sp_x = 1.0; 
         if sp_y <= 0: sp_y = 1.0; 
         if sp_z <= 0: sp_z = 1.0
-        
         scale_x = 1.0; scale_y = sp_x / sp_y; scale_z = sp_x / sp_z
-
-        new_lines = [] 
+        
+        # ---------------------------------------------------------
+        # ★軸ごとの更新ロジック
+        # ---------------------------------------------------------
+        draw_lines = []
         diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
         
-        def get_rotated_line(center_x, center_y, angle_deg, color_code):
+        def get_rotated_line(cx, cy, angle_deg, color_code):
             rad = np.radians(angle_deg)
             dx = np.cos(rad) * diag_len
             dy = np.sin(rad) * diag_len
-            p1 = QPointF(center_x - dx, center_y - dy)
-            p2 = QPointF(center_x + dx, center_y + dy)
+            p1 = QPointF(cx - dx, cy - dy)
+            p2 = QPointF(cx + dx, cy + dy)
             return {'start': p1, 'end': p2, 'color': QColor(color_code)}
 
-        # A. AXIAL (Yaw表示)
+        # A. AXIAL (XY平面)
         if self.view_plane == 'Axial':
-            my_cx = screen_center_x + (cx - vol_center_x) * scale_x
-            my_cy = screen_center_y + (cy - vol_center_y) * scale_y
-            yaw = sender_vp.rotation_angle 
-            
-            if sender_vp.view_plane == 'Coronal': # 青
-                new_lines.append(get_rotated_line(my_cx, my_cy, yaw, "#0000FF"))
-            elif sender_vp.view_plane == 'Sagittal': # 赤 (直交)
-                new_lines.append(get_rotated_line(my_cx, my_cy, yaw + 90, "#FF0000"))
+            if sender_vp.view_plane == 'Sagittal':
+                # Sagittalは「X軸(左右)」を決める -> new_x を更新
+                new_x = screen_center_x + (target_cx - my_cx) * scale_x
+                # 赤い縦線を描画
+                draw_lines.append(get_rotated_line(new_x, screen_center_y, sender_vp.rotation_angle + 90, "#FF0000"))
+                
+            elif sender_vp.view_plane == 'Coronal':
+                # Coronalは「Y軸(上下)」を決める -> new_y を更新
+                new_y = screen_center_y + (target_cy - my_cy) * scale_y
+                # 青い横線を描画
+                draw_lines.append(get_rotated_line(screen_center_x, new_y, sender_vp.rotation_angle, "#0000FF"))
 
-        # B. CORONAL (Roll表示)
+        # B. CORONAL (XZ平面)
         elif self.view_plane == 'Coronal':
-            target_idx_x = cx; center_idx_x = vol_center_x; chk_scale_x = scale_x
-            target_idx_y = cz; center_idx_y = vol_center_z; chk_scale_y = scale_z
-            pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
-            pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
-            roll = sender_vp.roll_angle
+            if sender_vp.view_plane == 'Sagittal':
+                # Sagittalは「X軸(左右)」を決める
+                new_x = screen_center_x + (target_cx - my_cx) * scale_x
+                # 赤い縦線
+                draw_lines.append(get_rotated_line(new_x, screen_center_y, sender_vp.roll_angle + 90, "#FF0000"))
+                
+            elif sender_vp.view_plane == 'Axial':
+                # Axialは「Z軸(上下)」を決める (Zは画面上で反転)
+                new_y = screen_center_y - (target_cz - my_cz) * scale_z
+                # 緑の横線
+                draw_lines.append(get_rotated_line(screen_center_x, new_y, sender_vp.roll_angle, "#00FF00"))
 
-            if sender_vp.view_plane == 'Axial': # 緑
-                new_lines.append(get_rotated_line(screen_center_x, pos_y, roll, "#00FF00"))
-            elif sender_vp.view_plane == 'Sagittal': # 赤 (直交)
-                new_lines.append(get_rotated_line(pos_x, screen_center_y, roll + 90, "#FF0000"))
-
-        # C. SAGITTAL (Pitch表示)
+        # C. SAGITTAL (YZ平面)
         elif self.view_plane == 'Sagittal':
-            target_idx_x = cy; center_idx_x = vol_center_y; chk_scale_x = scale_y
-            target_idx_y = cz; center_idx_y = vol_center_z; chk_scale_y = scale_z
-            pos_x = screen_center_x + (target_idx_x - center_idx_x) * chk_scale_x
-            pos_y = screen_center_y - (target_idx_y - center_idx_y) * chk_scale_y
-            pitch = sender_vp.pitch_angle
+            if sender_vp.view_plane == 'Coronal':
+                # Coronalは「Y軸(左右)」を決める
+                new_x = screen_center_x + (target_cy - my_cy) * scale_y
+                # 青い縦線
+                draw_lines.append(get_rotated_line(new_x, screen_center_y, sender_vp.pitch_angle + 90, "#0000FF"))
+                
+            elif sender_vp.view_plane == 'Axial':
+                # Axialは「Z軸(上下)」を決める
+                new_y = screen_center_y - (target_cz - my_cz) * scale_z
+                # 緑の横線
+                draw_lines.append(get_rotated_line(screen_center_x, new_y, sender_vp.pitch_angle, "#00FF00"))
 
-            if sender_vp.view_plane == 'Axial': # 緑
-                new_lines.append(get_rotated_line(screen_center_x, pos_y, pitch, "#00FF00"))
-            elif sender_vp.view_plane == 'Coronal': # 青 (直交)
-                new_lines.append(get_rotated_line(pos_x, screen_center_y, pitch + 90, "#0000FF"))
-
-        self.canvas.cross_ref_lines.extend(new_lines)
+        # 合成した座標を保存
+        self.canvas.cross_center_pos = QPointF(new_x, new_y)
+        
+        self.canvas.cross_ref_lines.extend(draw_lines)
         self.canvas.update()
 
     # --- 位置情報発信 ---
@@ -618,6 +645,15 @@ class ZetaViewport(QFrame):
             if self.current_tool_mode == 0:
                 canvas_pos = self.canvas.mapFrom(self, event.position().toPoint())
                 hit_type, hit_index = self.canvas.hit_test(canvas_pos)
+
+                if hit_type == 'cross_center':
+                    self.is_moving_center = True
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    
+                    # 開始位置と、開始時の3D座標を記録
+                    self.center_drag_start_pos = event.position()
+                    self.center_drag_start_coords = self.get_current_coordinates()
+                    return
                 
                 if hit_type == 'cross_ref':
                     line = self.canvas.cross_ref_lines[hit_index]
@@ -674,7 +710,8 @@ class ZetaViewport(QFrame):
         if self.current_tool_mode == 0 and not (event.buttons() & Qt.MouseButton.LeftButton):
              canvas_pos = self.canvas.mapFrom(self, current_pos.toPoint())
              hit_type, _ = self.canvas.hit_test(canvas_pos)
-             if hit_type == 'cross_ref': self.setCursor(Qt.CursorShape.PointingHandCursor)
+             if hit_type == 'cross_center': self.setCursor(Qt.CursorShape.SizeAllCursor)
+             elif hit_type == 'cross_ref': self.setCursor(Qt.CursorShape.PointingHandCursor)
              else: self.setCursor(Qt.CursorShape.ArrowCursor)
 
         if self.last_mouse_pos is None: self.last_mouse_pos = current_pos; return
@@ -682,6 +719,55 @@ class ZetaViewport(QFrame):
         delta_x = float(current_pos.x() - self.last_mouse_pos.x())
         delta_y = float(current_pos.y() - self.last_mouse_pos.y())
         buttons = event.buttons()
+
+        if self.is_moving_center and hasattr(self, 'center_drag_start_pos'):
+            # 1. 画面上の移動量
+            delta_screen_raw = current_pos - self.center_drag_start_pos
+            
+            # ズーム倍率を考慮
+            zoom = self.canvas.zoom_factor if hasattr(self.canvas, 'zoom_factor') else 1.0
+            vec_screen = np.array([delta_screen_raw.x() / zoom, delta_screen_raw.y() / zoom, 0])
+            
+            # 2. 逆回転行列で3D空間の移動量に変換
+            c, s = np.cos(np.radians(self.rotation_angle)), np.sin(np.radians(self.rotation_angle))
+            Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]) 
+            c, s = np.cos(np.radians(self.pitch_angle)), np.sin(np.radians(self.pitch_angle))
+            Rx = np.array([[1, 0, 0], [0, c, -s], [0, s, c]]) 
+            c, s = np.cos(np.radians(self.roll_angle)), np.sin(np.radians(self.roll_angle))
+            Ry = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]) 
+
+            if self.view_plane == 'Axial': rot_mat = Ry @ Rx
+            elif self.view_plane == 'Coronal': rot_mat = Rz @ Rx
+            elif self.view_plane == 'Sagittal': rot_mat = Rz @ Ry
+            else: rot_mat = Rz @ Ry @ Rx
+            
+            inv_rot = rot_mat.T
+            vec_world = inv_rot @ vec_screen
+            
+            # 3. ボクセル座標へ変換
+            sp_z, sp_y, sp_x = self.voxel_spacing
+            if sp_x<=0: sp_x=1.0
+            scale_x = 1.0; scale_y = sp_x / sp_y; scale_z = sp_x / sp_z
+            
+            start_cx, start_cy, start_cz = self.center_drag_start_coords
+            new_cx, new_cy, new_cz = start_cx, start_cy, start_cz
+            
+            if self.view_plane == 'Axial':
+                new_cx = start_cx + (vec_world[0] / scale_x)
+                new_cy = start_cy + (vec_world[1] / scale_y)
+            elif self.view_plane == 'Coronal':
+                new_cx = start_cx + (vec_world[0] / scale_x)
+                new_cz = start_cz - (vec_world[1] / scale_z)
+            elif self.view_plane == 'Sagittal':
+                new_cy = start_cy + (vec_world[0] / scale_y)
+                new_cz = start_cz - (vec_world[1] / scale_z)
+
+            # シグナル発行 (小数のまま)
+            self.request_center_move.emit(new_cx, new_cy, new_cz)
+            
+            # ※ここではまだパンニング(apply_pan)はしません
+            self.last_mouse_pos = current_pos
+            return
 
         if self.is_rotating_line:
              # × 修正前: center = self.rect().center()
@@ -728,12 +814,20 @@ class ZetaViewport(QFrame):
         self.last_mouse_pos = current_pos
 
     def mouseReleaseEvent(self, event):
+        # ★追加: 交点移動中であれば、フラグを下ろしてカーソルを戻す
+        if getattr(self, 'is_moving_center', False):
+            self.is_moving_center = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # --- 以下、既存のコード ---
         if self.is_rotating_line:
             self.is_rotating_line = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            
         if event.button() == Qt.MouseButton.RightButton:
             if not self.is_right_dragged: self.show_context_menu(event.globalPosition().toPoint())
             self.is_right_dragged = False
+            
         if self.current_tool_mode in [1, 2] and (event.button() == Qt.MouseButton.LeftButton):
             c = self.canvas
             if c.current_drawing_start and c.current_drawing_end:
@@ -755,6 +849,7 @@ class ZetaViewport(QFrame):
                         c.rois.append({'rect': rect, 'text': text, 'slice_index': self.current_index})
                         c.selected_type = 'roi'; c.selected_index = len(c.rois) - 1
                 c.current_drawing_start = None; c.current_drawing_end = None; c.update()
+        
         self.last_mouse_pos = None
 
     def paging_drag(self, dy):

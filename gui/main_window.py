@@ -187,15 +187,39 @@ class ZetaViewer(QMainWindow):
                 vp.processing_finish.connect(self.on_process_finish)
                 vp.cross_ref_pos_changed.connect(self.on_viewport_pos_changed)
                 vp.rotation_changed.connect(self.on_viewport_rotated)
+                vp.request_center_move.connect(self.on_request_center_move)
                 self.grid_layout.addWidget(vp, r, c)
                 self.viewports.append(vp)
         for i, vp in enumerate(self.viewports):
             if i < len(existing_states): vp.restore_state(existing_states[i])
         if self.viewports: self.select_single_viewport(self.viewports[0])
 
+    def on_request_center_move(self, cx, cy, cz):
+        if not self.viewports or self.viewports[0].volume_data is None: return
+        shape = self.viewports[0].volume_data.shape
+        
+        # 範囲制限
+        cx = max(0, min(cx, shape[2] - 1))
+        cy = max(0, min(cy, shape[1] - 1))
+        cz = max(0, min(cz, shape[0] - 1))
+        
+        # 全ビューポートの current_index を更新
+        for vp in self.viewports:
+            # v2.15では current_index がスライス位置の全てです
+            if vp.view_plane == 'Axial':
+                vp.current_index = int(round(cz))
+            elif vp.view_plane == 'Coronal':
+                vp.current_index = int(round(cy))
+            elif vp.view_plane == 'Sagittal':
+                vp.current_index = int(round(cx))
+            
+            # 再描画 (emit_position=Falseで無限ループ防止)
+            vp.update_display(emit_position=False)
+            
+        # 参照ラインの位置更新
+        self.update_all_cross_refs()
+
     def on_viewport_rotated(self, sender, angle):
-        # 1. 送信元(sender)が持っている「3つの角度」をすべて取得
-        # (viewport.py で計算された最新の値です)
         new_yaw   = sender.rotation_angle
         new_pitch = sender.pitch_angle
         new_roll  = sender.roll_angle
