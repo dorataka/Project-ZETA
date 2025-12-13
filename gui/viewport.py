@@ -176,11 +176,8 @@ class ZetaViewport(QFrame):
         if sp_x <= 0: sp_x = 1.0; 
         if sp_y <= 0: sp_y = 1.0; 
         if sp_z <= 0: sp_z = 1.0
-        scale_x = 1.0; scale_y = sp_x / sp_y; scale_z = sp_x / sp_z
-        
-        # ---------------------------------------------------------
-        # ★軸ごとの更新ロジック
-        # ---------------------------------------------------------
+        scale_x = 1.0; scale_y = sp_y / sp_x; scale_z = sp_z / sp_x
+
         draw_lines = []
         diag_len = (img_w**2 + img_h**2)**0.5 * 1.5
         
